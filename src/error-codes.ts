@@ -11,6 +11,7 @@ export const PASSWORD_POLICY_ERROR_CODES = defineErrorCodes({
   PASSWORD_CHANGE_REQUIRED: "Password change required",
   PASSWORD_EXPIRED: "Password expired, change it to continue",
   SIGN_IN_LOCKED: "Too many failed sign-in attempts, try again later",
+  PASSWORD_POLICY_UNAVAILABLE: "Password policy is unavailable, try again later",
 });
 
 export type PasswordPolicyErrorCode = keyof typeof PASSWORD_POLICY_ERROR_CODES;

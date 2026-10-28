@@ -4,6 +4,8 @@ import type { DBAdapter } from "better-auth/types";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import type { ResolvedLockout } from "./options.ts";
 import { readNonEmptyString, toRecord } from "./record.ts";
+import { tenantPolicyUnavailable } from "./tenant-resolver.ts";
+import type { EffectivePolicyResolver, PolicySubject } from "./tenant-resolver.ts";
 
 export const SIGN_IN_PATHS: readonly string[] = ["/sign-in/email", "/sign-in/username", "/sign-in/phone-number"];
 
@@ -56,6 +58,44 @@ export const signInLockoutIdentifier = (
     case "/sign-in/phone-number": {
       const phoneNumber = readNonEmptyString(fields, "phoneNumber");
       return phoneNumber === null ? null : `phone:${phoneNumber}`;
+    }
+    default:
+      return null;
+  }
+};
+
+export interface SignInUserLookup {
+  field: "email" | "username" | "phoneNumber";
+  value: string;
+}
+
+export const signInUserLookup = (
+  path: string | undefined,
+  body: unknown,
+  usernameNormalization: unknown,
+): SignInUserLookup | null => {
+  const fields = toRecord(body);
+  switch (path) {
+    case "/sign-in/email": {
+      const email = readNonEmptyString(fields, "email");
+      return email === null ? null : { field: "email", value: email.toLowerCase() };
+    }
+    case "/sign-in/username": {
+      const username = readNonEmptyString(fields, "username");
+      if (username === null) {
+        return null;
+      }
+      const normalized =
+        usernameNormalization === false
+          ? username
+          : isUsernameNormalizer(usernameNormalization)
+            ? normalizeUsername(username, usernameNormalization)
+            : username.toLowerCase();
+      return normalized === "" ? null : { field: "username", value: normalized };
+    }
+    case "/sign-in/phone-number": {
+      const phoneNumber = readNonEmptyString(fields, "phoneNumber");
+      return phoneNumber === null ? null : { field: "phoneNumber", value: phoneNumber };
     }
     default:
       return null;
@@ -132,10 +172,13 @@ const identifierWhere = (identifier: string) => ({ field: "identifier", value: i
 
 const lockUntil = (now: Date, lockout: ResolvedLockout): Date => new Date(now.getTime() + lockout.durationSeconds * 1000);
 
+type LockoutHookContext = Parameters<Parameters<typeof createAuthMiddleware>[0]>[0];
+
 type PasswordVerifier = (input: { hash: string; password: string }) => Promise<boolean>;
 
-export const createSignInLockoutHooks = (lockout: ResolvedLockout) => {
+export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePolicy: EffectivePolicyResolver) => {
   const requestsWithCorrectPassword = new WeakSet<object>();
+  const effectiveLockoutByRequest = new WeakMap<object, Promise<ResolvedLockout>>();
 
   const trackVerifiedPassword =
     (originalVerify: PasswordVerifier): PasswordVerifier =>
@@ -157,6 +200,49 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout) => {
   ): string | null => {
     const normalization = toRecord(plugin?.options).usernameNormalization;
     return signInLockoutIdentifier(path, body, isUsernameNormalizer(normalization) ? normalization : undefined);
+  };
+
+  const lookupEffectiveLockout = async (ctx: LockoutHookContext): Promise<ResolvedLockout> => {
+    const lookup = signInUserLookup(
+      ctx.path,
+      ctx.body,
+      toRecord(ctx.context.getPlugin("username")?.options).usernameNormalization,
+    );
+    let subject: PolicySubject = { kind: "anonymous", email: null };
+    if (lookup !== null) {
+      let found: Record<string, unknown> | null;
+      try {
+        found = await ctx.context.adapter.findOne<Record<string, unknown>>({
+          model: "user",
+          where: [{ field: lookup.field, value: lookup.value }],
+        });
+      } catch (error) {
+        ctx.context.logger.error("password-policy: failed to look up the user for tenantPolicy", error);
+        throw tenantPolicyUnavailable();
+      }
+      subject =
+        found !== null && typeof found.id === "string"
+          ? { kind: "user", record: toRecord(found) }
+          : { kind: "anonymous", email: lookup.field === "email" ? lookup.value : null };
+    }
+    const resolved = await effectivePolicy.resolve({ authContext: ctx.context, endpoint: ctx }, subject);
+    if (resolved.lockout === null) {
+      throw tenantPolicyUnavailable();
+    }
+    return resolved.lockout;
+  };
+
+  const effectiveLockout = (ctx: LockoutHookContext): Promise<ResolvedLockout> => {
+    if (!effectivePolicy.tenantAware) {
+      return Promise.resolve(lockout);
+    }
+    const cached = effectiveLockoutByRequest.get(ctx.context);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const pending = lookupEffectiveLockout(ctx);
+    effectiveLockoutByRequest.set(ctx.context, pending);
+    return pending;
   };
 
   const matcher = (context: { path?: string | undefined }): boolean =>
@@ -190,6 +276,8 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout) => {
         });
       }
 
+      const effective = await effectiveLockout(ctx);
+
       const reserve = () =>
         adapter.incrementOne<LockoutRow>({
           model: LOCKOUT_MODEL,
@@ -213,11 +301,11 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout) => {
         }
       }
 
-      if (reserved.failedAttempts > lockout.maxAttempts) {
+      if (reserved.failedAttempts > effective.maxAttempts) {
         await adapter.updateMany({
           model: LOCKOUT_MODEL,
           where: [identifierWhere(identifier)],
-          update: { lockedUntil: lockUntil(now, lockout) },
+          update: { lockedUntil: lockUntil(now, effective) },
         });
         throw lockedError();
       }
@@ -238,15 +326,17 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout) => {
         return;
       }
 
+      const effective = await effectiveLockout(ctx);
+
       const row = await adapter.findOne<LockoutRow>({
         model: LOCKOUT_MODEL,
         where: [identifierWhere(identifier)],
       });
-      if (row !== null && row.failedAttempts >= lockout.maxAttempts) {
+      if (row !== null && row.failedAttempts >= effective.maxAttempts) {
         await adapter.updateMany({
           model: LOCKOUT_MODEL,
           where: [identifierWhere(identifier)],
-          update: { lockedUntil: lockUntil(new Date(), lockout) },
+          update: { lockedUntil: lockUntil(new Date(), effective) },
         });
       }
     }),

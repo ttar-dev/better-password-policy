@@ -15,6 +15,7 @@ describe("resolvePasswordPolicyOptions defaults", () => {
   it("resolves every feature to its documented default", () => {
     expect(resolvePasswordPolicyOptions()).toEqual({
       complexity: {
+        minLength: null,
         requireUppercase: true,
         requireLowercase: true,
         requireDigit: true,
@@ -24,6 +25,7 @@ describe("resolvePasswordPolicyOptions defaults", () => {
       },
       historyCount: 5,
       maxAgeSeconds: null,
+      expirationDisabled: false,
       lockout: { maxAttempts: 5, durationSeconds: 900 },
     });
   });
@@ -41,6 +43,7 @@ describe("resolvePasswordPolicyOptions partial objects", () => {
       complexity: { requireSymbol: true, requireUppercase: false },
     });
     expect(resolved.complexity).toEqual({
+      minLength: null,
       requireUppercase: false,
       requireLowercase: true,
       requireDigit: true,
@@ -81,6 +84,12 @@ describe("resolvePasswordPolicyOptions partial objects", () => {
     );
   });
 
+  it.each([1, 8, 128])("resolves complexity minLength %i as given", (minLength) => {
+    expect(resolvePasswordPolicyOptions({ complexity: { minLength } }).complexity?.minLength).toBe(
+      minLength,
+    );
+  });
+
   it("converts expiration maxAge into maxAgeSeconds", () => {
     expect(resolvePasswordPolicyOptions({ expiration: { maxAge: 3600 } }).maxAgeSeconds).toBe(
       3600,
@@ -103,6 +112,20 @@ describe("resolvePasswordPolicyOptions with a feature switched off", () => {
 
   it("resolves lockout false to null", () => {
     expect(resolvePasswordPolicyOptions({ lockout: false }).lockout).toBeNull();
+  });
+
+  it("leaves expirationDisabled false when expiration is omitted", () => {
+    expect(resolvePasswordPolicyOptions().expirationDisabled).toBe(false);
+  });
+
+  it("leaves expirationDisabled false when expiration has a maxAge", () => {
+    expect(resolvePasswordPolicyOptions({ expiration: { maxAge: 3600 } }).expirationDisabled).toBe(
+      false,
+    );
+  });
+
+  it("sets expirationDisabled true when expiration is false", () => {
+    expect(resolvePasswordPolicyOptions({ expiration: false }).expirationDisabled).toBe(true);
   });
 
   it("switching one feature off leaves the others at their defaults", () => {
@@ -128,6 +151,12 @@ describe("resolvePasswordPolicyOptions validation", () => {
     ["lockout.duration negative", { lockout: { duration: -5 } }],
     ["lockout.duration infinite", { lockout: { duration: Number.POSITIVE_INFINITY } }],
     ["lockout.duration NaN", { lockout: { duration: Number.NaN } }],
+    ["complexity.minLength zero", { complexity: { minLength: 0 } }],
+    ["complexity.minLength negative", { complexity: { minLength: -1 } }],
+    ["complexity.minLength fractional", { complexity: { minLength: 1.5 } }],
+    ["complexity.minLength NaN", { complexity: { minLength: Number.NaN } }],
+    ["complexity.minLength infinite", { complexity: { minLength: Number.POSITIVE_INFINITY } }],
+    ["complexity.minLength above 128", { complexity: { minLength: 129 } }],
   ];
 
   it.each(invalidOptions)("throws a password-policy TypeError for %s", (_name, options) => {

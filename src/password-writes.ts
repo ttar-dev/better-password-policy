@@ -1,24 +1,49 @@
 import type { AuthContext } from "@better-auth/core";
 import type { PasswordWriteTargets } from "./password-hash.ts";
 import { deleteLockoutRows, lockoutIdentifiersOfRecord } from "./lockout.ts";
-import type { ResolvedPasswordPolicy } from "./options.ts";
 import { ADMIN_PASSWORD_PATHS } from "./password-targets.ts";
 import { readNonEmptyString, toRecord } from "./record.ts";
+import type { EffectivePolicyResolver, PolicyEndpointContext } from "./tenant-resolver.ts";
 
 const HISTORY_MODEL = "passwordHistory";
 
+const selectStaleHistoryIds = async (
+  authContext: AuthContext,
+  effectivePolicy: EffectivePolicyResolver,
+  endpoint: PolicyEndpointContext | null,
+  userId: string,
+  rows: { id: string }[],
+): Promise<string[]> => {
+  const { base } = effectivePolicy;
+  if (base.historyCount === null || rows.length <= base.historyCount + 1) {
+    return [];
+  }
+  let keep = base.historyCount + 1;
+  if (effectivePolicy.tenantAware) {
+    try {
+      const effective = await effectivePolicy.resolve({ authContext, endpoint }, { kind: "user-id", userId });
+      keep = (effective.historyCount ?? base.historyCount) + 1;
+    } catch {
+      return [];
+    }
+  }
+  return rows.slice(keep).map((row) => row.id);
+};
+
 export const recordCredentialPasswordWrite = async (
   authContext: AuthContext,
-  policy: ResolvedPasswordPolicy,
+  effectivePolicy: EffectivePolicyResolver,
+  endpoint: PolicyEndpointContext | null,
   userId: string,
   passwordHash: string,
-  endpointPath: string | undefined,
 ): Promise<void> => {
+  const { base } = effectivePolicy;
+  const endpointPath = endpoint?.path;
   try {
     const now = new Date();
     const adapter = authContext.adapter;
 
-    if (policy.historyCount !== null) {
+    if (base.historyCount !== null) {
       await adapter.create({
         model: HISTORY_MODEL,
         data: { userId, passwordHash, createdAt: now },
@@ -28,7 +53,7 @@ export const recordCredentialPasswordWrite = async (
         where: [{ field: "userId", value: userId }],
         sortBy: { field: "createdAt", direction: "desc" },
       });
-      const staleIds = rows.slice(policy.historyCount + 1).map((row) => row.id);
+      const staleIds = await selectStaleHistoryIds(authContext, effectivePolicy, endpoint, userId, rows);
       if (staleIds.length > 0) {
         await adapter.deleteMany({
           model: HISTORY_MODEL,
@@ -51,7 +76,7 @@ export const recordCredentialPasswordWrite = async (
 };
 
 export const createPasswordWriteHooks = (
-  policy: ResolvedPasswordPolicy,
+  effectivePolicy: EffectivePolicyResolver,
   authContext: AuthContext,
   passwordWriteTargets: PasswordWriteTargets,
 ) => {
@@ -62,12 +87,18 @@ export const createPasswordWriteHooks = (
       create: {
         after: async (
           account: { userId: string; providerId: string; password?: string | null },
-          context: { path?: string } | null,
+          context: PolicyEndpointContext | null | undefined,
         ): Promise<void> => {
           if (account.providerId !== "credential" || !account.password) {
             return;
           }
-          await recordCredentialPasswordWrite(authContext, policy, account.userId, account.password, context?.path);
+          await recordCredentialPasswordWrite(
+            authContext,
+            effectivePolicy,
+            context ?? null,
+            account.userId,
+            account.password,
+          );
         },
       },
       update: {
@@ -80,7 +111,7 @@ export const createPasswordWriteHooks = (
             pendingPasswordHashes.set(context, password);
           }
         },
-        after: async (result: unknown, context: { path?: string } | null): Promise<void> => {
+        after: async (result: unknown, context: PolicyEndpointContext | null): Promise<void> => {
           if (context === null) {
             return;
           }
@@ -95,10 +126,10 @@ export const createPasswordWriteHooks = (
             if (result > 0 && target !== undefined) {
               await recordCredentialPasswordWrite(
                 authContext,
-                policy,
+                effectivePolicy,
+                context,
                 target.userId,
                 target.passwordHash,
-                context.path,
               );
             }
             return;
@@ -109,10 +140,10 @@ export const createPasswordWriteHooks = (
           if (row.providerId === "credential" && userId !== null) {
             await recordCredentialPasswordWrite(
               authContext,
-              policy,
+              effectivePolicy,
+              context,
               userId,
               readNonEmptyString(row, "password") ?? pendingHash,
-              context.path,
             );
           }
         },

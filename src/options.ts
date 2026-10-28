@@ -1,5 +1,6 @@
 import type { InferOptionSchema } from "better-auth/types";
 import type { PasswordPolicySchema } from "./schema.ts";
+import { TENANT_PASSWORD_POLICY_LIMITS } from "./tenant-policy.ts";
 
 export interface PasswordValidationInput {
   password: string;
@@ -9,6 +10,7 @@ export interface PasswordValidationInput {
 export type PasswordValidator = (input: PasswordValidationInput) => boolean | Promise<boolean>;
 
 export interface PasswordComplexityOptions {
+  minLength?: number;
   requireUppercase?: boolean;
   requireLowercase?: boolean;
   requireDigit?: boolean;
@@ -30,15 +32,50 @@ export interface SignInLockoutOptions {
   duration?: number;
 }
 
+export interface TenantPasswordPolicyOverride {
+  complexity?: {
+    minLength?: number;
+    requireUppercase?: boolean;
+    requireLowercase?: boolean;
+    requireDigit?: boolean;
+    requireSymbol?: boolean;
+    rejectPersonalInfo?: boolean;
+  };
+  history?: { count?: number };
+  expiration?: { maxAge?: number };
+  lockout?: { maxAttempts?: number; duration?: number };
+}
+
+export interface TenantPasswordPolicyUser {
+  id: string;
+  email: string;
+  name: string;
+  [field: string]: unknown;
+}
+
+export interface TenantPasswordPolicyContext {
+  user: TenantPasswordPolicyUser | null;
+  email: string | null;
+  path: string | null;
+  headers: Headers | null;
+  request: Request | null;
+}
+
+export type TenantPasswordPolicyResolver = (
+  context: TenantPasswordPolicyContext,
+) => TenantPasswordPolicyOverride | null | undefined | Promise<TenantPasswordPolicyOverride | null | undefined>;
+
 export interface PasswordPolicyOptions {
   complexity?: PasswordComplexityOptions | false;
   history?: PasswordHistoryOptions | false;
   expiration?: PasswordExpirationOptions | false;
   lockout?: SignInLockoutOptions | false;
+  tenantPolicy?: TenantPasswordPolicyResolver;
   schema?: InferOptionSchema<PasswordPolicySchema>;
 }
 
 export interface ResolvedComplexity {
+  minLength: number | null;
   requireUppercase: boolean;
   requireLowercase: boolean;
   requireDigit: boolean;
@@ -56,6 +93,7 @@ export interface ResolvedPasswordPolicy {
   complexity: ResolvedComplexity | null;
   historyCount: number | null;
   maxAgeSeconds: number | null;
+  expirationDisabled: boolean;
   lockout: ResolvedLockout | null;
 }
 
@@ -69,7 +107,13 @@ const resolveComplexity = (option: PasswordPolicyOptions["complexity"]): Resolve
   if (option === false) {
     return null;
   }
+  const minLength = option?.minLength ?? null;
+  const limits = TENANT_PASSWORD_POLICY_LIMITS.complexity.minLength;
+  if (minLength !== null && (!Number.isInteger(minLength) || minLength < limits.min || minLength > limits.max)) {
+    throw invalid(`complexity.minLength must be an integer between ${limits.min} and ${limits.max}`);
+  }
   return {
+    minLength,
     requireUppercase: option?.requireUppercase ?? true,
     requireLowercase: option?.requireLowercase ?? true,
     requireDigit: option?.requireDigit ?? true,
@@ -119,5 +163,18 @@ export const resolvePasswordPolicyOptions = (options?: PasswordPolicyOptions): R
   complexity: resolveComplexity(options?.complexity),
   historyCount: resolveHistoryCount(options?.history),
   maxAgeSeconds: resolveMaxAgeSeconds(options?.expiration),
+  expirationDisabled: options?.expiration === false,
   lockout: resolveLockout(options?.lockout),
 });
+
+const isTenantPolicyResolver = (value: unknown): value is TenantPasswordPolicyResolver => typeof value === "function";
+
+export const resolveTenantPolicyOption = (option: unknown): TenantPasswordPolicyResolver | null => {
+  if (option === undefined) {
+    return null;
+  }
+  if (!isTenantPolicyResolver(option)) {
+    throw invalid("tenantPolicy must be a function");
+  }
+  return option;
+};

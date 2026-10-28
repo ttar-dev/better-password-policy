@@ -184,6 +184,9 @@ export const expectNotFound = (run: () => Promise<unknown>, code: string) =>
 export const expectTooManyRequests = (run: () => Promise<unknown>, code: string) =>
   expectApiError(run, { status: "TOO_MANY_REQUESTS", statusCode: 429, code });
 
+export const expectServiceUnavailable = (run: () => Promise<unknown>, code: string) =>
+  expectApiError(run, { status: "SERVICE_UNAVAILABLE", statusCode: 503, code });
+
 export const createTestAuth = async (options: TestAuthOptions = {}) => {
   const client = new PGlite();
   const db = drizzle({ client, schema });

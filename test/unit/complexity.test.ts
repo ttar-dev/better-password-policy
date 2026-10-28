@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findComplexityViolation, personalInfoTokens } from "../../src/complexity.ts";
+import { findComplexityViolation, personalInfoTokens, isPasswordTooShort } from "../../src/complexity.ts";
 import { resolvePasswordPolicyOptions } from "../../src/options.ts";
 import type { PasswordPolicyOptions } from "../../src/index.ts";
 
@@ -137,5 +137,29 @@ describe("personalInfoTokens", () => {
 
   it("returns an empty list when nothing is provided", () => {
     expect(personalInfoTokens({})).toEqual([]);
+  });
+});
+
+describe("isPasswordTooShort", () => {
+  it("is false when no minimum length is set", () => {
+    expect(isPasswordTooShort("a", null)).toBe(false);
+    expect(isPasswordTooShort("", null)).toBe(false);
+  });
+
+  it("is true for a password shorter than the minimum", () => {
+    expect(isPasswordTooShort("abcdefg", 8)).toBe(true);
+  });
+
+  it("is false for a password exactly as long as the minimum", () => {
+    expect(isPasswordTooShort("abcdefgh", 8)).toBe(false);
+  });
+
+  it("is false for a password longer than the minimum", () => {
+    expect(isPasswordTooShort("abcdefghi", 8)).toBe(false);
+  });
+
+  it("measures length in UTF-16 code units so one emoji counts as two", () => {
+    expect(isPasswordTooShort("😀😀", 4)).toBe(false);
+    expect(isPasswordTooShort("😀😀", 5)).toBe(true);
   });
 });

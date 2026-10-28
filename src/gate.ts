@@ -2,6 +2,7 @@ import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/a
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { toRecord } from "./record.ts";
 import { getPasswordChangeRequirement, type PasswordChangeRequirement } from "./requirement.ts";
+import type { EffectivePolicyResolver } from "./tenant-resolver.ts";
 
 export const PASSWORD_CHANGE_EXEMPT_PATHS: readonly string[] = [
   "/change-password",
@@ -80,11 +81,33 @@ const collectCandidateSessions = async (ctx: GateContext): Promise<GateSession[]
   }
 };
 
-const strictestRequirement = async (ctx: GateContext, candidates: GateSession[], maxAgeSeconds: number | null) => {
+const requirementFor = async (
+  ctx: GateContext,
+  effectivePolicy: EffectivePolicyResolver,
+  user: unknown,
+): Promise<PasswordChangeRequirement> => {
+  const { base } = effectivePolicy;
+  const input = toRequirementInput(user);
+  const underBase = getPasswordChangeRequirement(input, base.maxAgeSeconds);
+  if (underBase !== null || !effectivePolicy.tenantAware || base.expirationDisabled || input.passwordChangedAt === null) {
+    return underBase;
+  }
+  const effective = await effectivePolicy.resolve(
+    { authContext: ctx.context, endpoint: ctx },
+    { kind: "user", record: toRecord(user) },
+  );
+  return getPasswordChangeRequirement(input, effective.maxAgeSeconds);
+};
+
+const strictestRequirement = async (
+  ctx: GateContext,
+  candidates: GateSession[],
+  effectivePolicy: EffectivePolicyResolver,
+) => {
   const checkedUserIds = new Set<string>();
   let strictest: PasswordChangeRequirement = null;
   for (const candidate of candidates) {
-    if (getPasswordChangeRequirement(toRequirementInput(candidate.user), maxAgeSeconds) === null) {
+    if ((await requirementFor(ctx, effectivePolicy, candidate.user)) === null) {
       continue;
     }
     if (checkedUserIds.has(candidate.user.id)) {
@@ -92,7 +115,7 @@ const strictestRequirement = async (ctx: GateContext, candidates: GateSession[],
     }
     checkedUserIds.add(candidate.user.id);
     const freshUser = await ctx.context.internalAdapter.findUserById(candidate.user.id);
-    const requirement = freshUser ? getPasswordChangeRequirement(toRequirementInput(freshUser), maxAgeSeconds) : null;
+    const requirement = freshUser ? await requirementFor(ctx, effectivePolicy, freshUser) : null;
     if (requirement === "forced") {
       return "forced";
     }
@@ -103,11 +126,11 @@ const strictestRequirement = async (ctx: GateContext, candidates: GateSession[],
   return strictest;
 };
 
-export const createPasswordChangeGate = (maxAgeSeconds: number | null) => ({
+export const createPasswordChangeGate = (effectivePolicy: EffectivePolicyResolver) => ({
   matcher: (context: { path?: string | undefined }): boolean =>
     typeof context.path === "string" && !PASSWORD_CHANGE_EXEMPT_PATHS.includes(context.path),
   handler: createAuthMiddleware(async (ctx) => {
-    const requirement = await strictestRequirement(ctx, await collectCandidateSessions(ctx), maxAgeSeconds);
+    const requirement = await strictestRequirement(ctx, await collectCandidateSessions(ctx), effectivePolicy);
     if (requirement === "forced") {
       throw APIError.from("FORBIDDEN", PASSWORD_POLICY_ERROR_CODES.PASSWORD_CHANGE_REQUIRED);
     }

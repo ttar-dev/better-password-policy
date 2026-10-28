@@ -22,6 +22,7 @@ export type PasswordTarget =
       email: string | null;
       name: string | null;
       currentPasswordHash: string | null;
+      record: Record<string, unknown>;
     }
   | { kind: "unauthorized" };
 
@@ -51,6 +52,7 @@ const toExistingUser = async (c: AuthEndpointContext, user: TargetUser): Promise
     email: user.email,
     name: user.name,
     currentPasswordHash: account?.password || null,
+    record: toRecord(user),
   };
 };
 
@@ -86,6 +88,7 @@ const resolveChangePasswordTarget = async (c: AuthEndpointContext): Promise<Pass
     email: sessionUser.email,
     name: sessionUser.name,
     currentPasswordHash: account.password,
+    record: toRecord(sessionUser),
   };
 };
 

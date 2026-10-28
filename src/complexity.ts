@@ -40,6 +40,9 @@ export const personalInfoTokens = ({ email, name }: PersonalInfo): string[] => {
   return [...new Set(tokens)];
 };
 
+export const isPasswordTooShort = (password: string, minLength: number | null): boolean =>
+  minLength !== null && password.length < minLength;
+
 export const findComplexityViolation = (
   password: string,
   rules: ComplexityRules,

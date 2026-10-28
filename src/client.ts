@@ -12,3 +12,10 @@ export const passwordPolicyClient = () =>
 export { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 export { getPasswordChangeRequirement, getPasswordExpiresAt } from "./requirement.ts";
 export type { PasswordChangeRequirement } from "./requirement.ts";
+export { TENANT_PASSWORD_POLICY_LIMITS, validateTenantPasswordPolicyOverride } from "./tenant-policy.ts";
+export type {
+  EffectivePasswordPolicy,
+  TenantPasswordPolicyIssue,
+  TenantPasswordPolicyValidationResult,
+} from "./tenant-policy.ts";
+export type { TenantPasswordPolicyOverride } from "./options.ts";

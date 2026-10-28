@@ -6,12 +6,16 @@ import {
   PASSWORD_CHANGE_EXEMPT_PATHS,
   getPasswordChangeRequirement,
   getPasswordExpiresAt,
+  validateTenantPasswordPolicyOverride,
+  TENANT_PASSWORD_POLICY_LIMITS,
 } from "../../src/index.ts";
 import {
   passwordPolicyClient,
   PASSWORD_POLICY_ERROR_CODES as CLIENT_ERROR_CODES,
   getPasswordChangeRequirement as clientGetPasswordChangeRequirement,
   getPasswordExpiresAt as clientGetPasswordExpiresAt,
+  validateTenantPasswordPolicyOverride as clientValidateTenantPasswordPolicyOverride,
+  TENANT_PASSWORD_POLICY_LIMITS as CLIENT_TENANT_PASSWORD_POLICY_LIMITS,
 } from "../../src/client.ts";
 
 describe("passwordPolicy factory", () => {
@@ -83,6 +87,69 @@ describe("passwordPolicy factory", () => {
   });
 });
 
+describe("passwordPolicy factory with tenantPolicy", () => {
+  const tenantPolicy = () => null;
+
+  it("registers the same hook counts as without tenantPolicy by default", () => {
+    const plugin = passwordPolicy({ tenantPolicy });
+    expect(plugin.hooks.before).toHaveLength(3);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("drops the lockout hooks when lockout is off", () => {
+    const plugin = passwordPolicy({ tenantPolicy, lockout: false });
+    expect(plugin.hooks.before).toHaveLength(2);
+    expect(plugin.hooks.after).toHaveLength(0);
+  });
+
+  it("drops the admin create-user hook when complexity is off", () => {
+    const plugin = passwordPolicy({ tenantPolicy, complexity: false });
+    expect(plugin.hooks.before).toHaveLength(2);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("keeps only the gate when lockout and complexity are both off", () => {
+    const plugin = passwordPolicy({ tenantPolicy, lockout: false, complexity: false });
+    expect(plugin.hooks.before).toHaveLength(1);
+    expect(plugin.hooks.after).toHaveLength(0);
+  });
+
+  it("still exposes exactly three server-only endpoints without an http path", () => {
+    const endpoints = passwordPolicy({ tenantPolicy }).endpoints as Record<
+      string,
+      { path?: string; options: { metadata?: { SERVER_ONLY?: boolean } } }
+    >;
+    expect(Object.keys(endpoints).sort()).toEqual(
+      ["getPasswordPolicyStatus", "setPasswordChangeRequired", "unlockSignIn"].sort(),
+    );
+    for (const endpoint of Object.values(endpoints)) {
+      expect(endpoint.path).toBeUndefined();
+      expect(endpoint.options.metadata?.SERVER_ONLY).toBe(true);
+    }
+  });
+
+  it.each([
+    ["a string", "tenant-a"],
+    ["an object", {}],
+    ["a number", 1],
+    ["true", true],
+  ])("throws a password-policy TypeError when tenantPolicy is %s", (_name, value) => {
+    let thrown: unknown;
+    try {
+      passwordPolicy({ tenantPolicy: value as never });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+
+  it("accepts an omitted or undefined tenantPolicy", () => {
+    expect(() => passwordPolicy({})).not.toThrow();
+    expect(() => passwordPolicy({ tenantPolicy: undefined })).not.toThrow();
+  });
+});
+
 describe("passwordPolicySchema", () => {
   it("defines the user columns as optional and not settable by input", () => {
     expect(passwordPolicySchema.user.fields.mustChangePassword).toMatchObject({
@@ -135,6 +202,7 @@ describe("PASSWORD_POLICY_ERROR_CODES", () => {
     PASSWORD_CHANGE_REQUIRED: "Password change required",
     PASSWORD_EXPIRED: "Password expired, change it to continue",
     SIGN_IN_LOCKED: "Too many failed sign-in attempts, try again later",
+    PASSWORD_POLICY_UNAVAILABLE: "Password policy is unavailable, try again later",
   };
 
   it("defines exactly the documented keys", () => {
@@ -202,5 +270,10 @@ describe("passwordPolicyClient", () => {
   it("re-exports the pure requirement helpers", () => {
     expect(clientGetPasswordChangeRequirement).toBe(getPasswordChangeRequirement);
     expect(clientGetPasswordExpiresAt).toBe(getPasswordExpiresAt);
+  });
+
+  it("re-exports the tenant override validator and limits as the same references", () => {
+    expect(clientValidateTenantPasswordPolicyOverride).toBe(validateTenantPasswordPolicyOverride);
+    expect(CLIENT_TENANT_PASSWORD_POLICY_LIMITS).toBe(TENANT_PASSWORD_POLICY_LIMITS);
   });
 });

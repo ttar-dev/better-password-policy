@@ -2,9 +2,10 @@ import { BASE_ERROR_CODES } from "@better-auth/core/error";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import * as z from "zod";
 import { deleteLockoutRows, lockoutIdentifiersOfRecord, readLockoutState } from "./lockout.ts";
-import type { ResolvedPasswordPolicy } from "./options.ts";
 import { toRecord } from "./record.ts";
 import { getPasswordChangeRequirement, getPasswordExpiresAt } from "./requirement.ts";
+import { toEffectivePasswordPolicy } from "./tenant-policy.ts";
+import type { EffectivePolicyResolver } from "./tenant-resolver.ts";
 
 const toDateOrNull = (value: unknown): Date | null => {
   if (value instanceof Date) {
@@ -17,7 +18,7 @@ const toDateOrNull = (value: unknown): Date | null => {
   return null;
 };
 
-export const createPasswordPolicyEndpoints = (policy: ResolvedPasswordPolicy) => ({
+export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyResolver) => ({
   setPasswordChangeRequired: createAuthEndpoint.serverOnly(
     {
       method: "POST",
@@ -57,22 +58,27 @@ export const createPasswordPolicyEndpoints = (policy: ResolvedPasswordPolicy) =>
         throw APIError.from("NOT_FOUND", BASE_ERROR_CODES.USER_NOT_FOUND);
       }
       const fields = toRecord(user);
+      const effective = await effectivePolicy.resolve(
+        { authContext: ctx.context, endpoint: { context: ctx.context, headers: ctx.headers, request: ctx.request } },
+        { kind: "user", record: fields },
+      );
       const mustChangePassword = fields.mustChangePassword === true;
       const passwordChangedAt = toDateOrNull(fields.passwordChangedAt);
       const lockoutState =
-        policy.lockout === null
+        effective.lockout === null
           ? { lockedUntil: null, failedAttempts: 0 }
           : await readLockoutState(ctx.context.adapter, lockoutIdentifiersOfRecord(user), new Date());
       return ctx.json({
         mustChangePassword,
         passwordChangedAt,
-        passwordExpiresAt: getPasswordExpiresAt(passwordChangedAt, policy.maxAgeSeconds),
+        passwordExpiresAt: getPasswordExpiresAt(passwordChangedAt, effective.maxAgeSeconds),
         passwordChangeRequirement: getPasswordChangeRequirement(
           { mustChangePassword, passwordChangedAt },
-          policy.maxAgeSeconds,
+          effective.maxAgeSeconds,
         ),
         lockedUntil: lockoutState.lockedUntil,
         failedSignInAttempts: lockoutState.failedAttempts,
+        policy: toEffectivePasswordPolicy(effective, ctx.context.password.config),
       });
     },
   ),

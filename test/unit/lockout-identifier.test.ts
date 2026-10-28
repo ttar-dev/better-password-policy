@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { signInLockoutIdentifier, lockoutIdentifiersForUser } from "../../src/lockout.ts";
+import { signInLockoutIdentifier, lockoutIdentifiersForUser, signInUserLookup } from "../../src/lockout.ts";
 
 describe("signInLockoutIdentifier", () => {
   it("lowercases the email for the email sign-in path", () => {
@@ -71,5 +71,73 @@ describe("lockoutIdentifiersForUser", () => {
       "email:a@b.co",
       "phone:+1",
     ]);
+  });
+});
+
+describe("signInUserLookup", () => {
+  it("lowercases the email for the email sign-in path", () => {
+    expect(signInUserLookup("/sign-in/email", { email: "Alice@Example.COM" }, undefined)).toEqual({
+      field: "email",
+      value: "alice@example.com",
+    });
+  });
+
+  it("lowercases the username when no normalization is configured", () => {
+    expect(signInUserLookup("/sign-in/username", { username: "Alice" }, undefined)).toEqual({
+      field: "username",
+      value: "alice",
+    });
+  });
+
+  it("keeps the raw username when normalization is false", () => {
+    expect(signInUserLookup("/sign-in/username", { username: "Alice" }, false)).toEqual({
+      field: "username",
+      value: "Alice",
+    });
+  });
+
+  it("uses the normalization function result as is without lowercasing it", () => {
+    const normalization = (value: string) => value.replace(".", "");
+    expect(signInUserLookup("/sign-in/username", { username: "Al.Ice" }, normalization)).toEqual({
+      field: "username",
+      value: "AlIce",
+    });
+  });
+
+  it("lowercases the username for any other normalization value", () => {
+    expect(signInUserLookup("/sign-in/username", { username: "Alice" }, true)).toEqual({
+      field: "username",
+      value: "alice",
+    });
+  });
+
+  it("keeps the phone number raw", () => {
+    expect(signInUserLookup("/sign-in/phone-number", { phoneNumber: "+66812345678" }, undefined)).toEqual({
+      field: "phoneNumber",
+      value: "+66812345678",
+    });
+  });
+
+  it("returns null when the identifying field is missing", () => {
+    expect(signInUserLookup("/sign-in/email", {}, undefined)).toBeNull();
+    expect(signInUserLookup("/sign-in/username", { email: "a@b.co" }, undefined)).toBeNull();
+    expect(signInUserLookup("/sign-in/phone-number", {}, undefined)).toBeNull();
+  });
+
+  it("returns null when the identifying field is not a string", () => {
+    expect(signInUserLookup("/sign-in/email", { email: 123 }, undefined)).toBeNull();
+    expect(signInUserLookup("/sign-in/phone-number", { phoneNumber: null }, undefined)).toBeNull();
+  });
+
+  it("returns null when the identifying field is an empty string", () => {
+    expect(signInUserLookup("/sign-in/email", { email: "" }, undefined)).toBeNull();
+    expect(signInUserLookup("/sign-in/username", { username: "" }, undefined)).toBeNull();
+    expect(signInUserLookup("/sign-in/phone-number", { phoneNumber: "" }, undefined)).toBeNull();
+  });
+
+  it("returns null for a path that is not a credential sign-in path", () => {
+    expect(signInUserLookup("/sign-in/social", { email: "a@b.co" }, undefined)).toBeNull();
+    expect(signInUserLookup("/change-password", { email: "a@b.co" }, undefined)).toBeNull();
+    expect(signInUserLookup(undefined, { email: "a@b.co" }, undefined)).toBeNull();
   });
 });
