@@ -1,0 +1,29 @@
+{
+  "name": "@ttar-dev/better-password-policy",
+  "version": "1.0.0",
+  "description": "Password complexity, history, expiry, forced change and sign-in lockout for Better Auth",
+  "keywords": ["better-auth", "password-policy", "lockout"],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "exports": {
+    ".": { "types": "./dist/index.d.mts", "import": "./dist/index.mjs" },
+    "./client": { "types": "./dist/client.d.mts", "import": "./dist/client.mjs" },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "generate:test-schema": "node scripts/generate-test-schema.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "peerDependencies": { "@better-auth/core": ">=1.7.12 <1.8.0", "better-auth": ">=1.7.12 <1.8.0", "zod": "^4.5.4" },
+  "devDependencies": {
+    "@better-auth/core": "1.7.12", "@electric-sql/pglite": "0.5.11", "@types/node": "26.6.5",
+    "auth": "1.7.12", "better-auth": "1.7.12", "drizzle-kit": "0.31.11", "drizzle-orm": "0.45.4",
+    "tsdown": "0.23.2", "typescript": "6.0.3", "vitest": "5.0.5", "zod": "4.6.7"
+  }
+}
