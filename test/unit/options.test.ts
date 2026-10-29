@@ -27,6 +27,7 @@ describe("resolvePasswordPolicyOptions defaults", () => {
       historyCount: 5,
       maxAgeSeconds: null,
       expirationDisabled: false,
+      forcedChange: true,
       lockout: { maxAttempts: 5, durationSeconds: 900 },
     });
   });
@@ -191,6 +192,42 @@ describe("resolvePasswordPolicyOptions validation", () => {
     const error = captureError(() => resolvePasswordPolicyOptions(options));
     expect(error).toBeInstanceOf(TypeError);
     expect((error as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+});
+
+describe("resolvePasswordPolicyOptions with forcedChange", () => {
+  it.each([
+    ["omitted", undefined, true],
+    ["true", true, true],
+    ["false", false, false],
+  ] as const)("resolves forcedChange %s to %s", (_name, value, expected) => {
+    const options: PasswordPolicyOptions = value === undefined ? {} : { forcedChange: value };
+    expect(resolvePasswordPolicyOptions(options).forcedChange).toBe(expected);
+  });
+
+  it("resolves forcedChange true and omitted to the same policy", () => {
+    expect(resolvePasswordPolicyOptions({ forcedChange: true })).toEqual(resolvePasswordPolicyOptions());
+  });
+
+  it("switching forcedChange off leaves every other feature at its default", () => {
+    expect({ ...resolvePasswordPolicyOptions({ forcedChange: false }), forcedChange: true }).toEqual(
+      resolvePasswordPolicyOptions(),
+    );
+  });
+
+  it.each([
+    ["null", null],
+    ["the string false", "false"],
+    ["the string true", "true"],
+    ["zero", 0],
+    ["one", 1],
+    ["an empty object", {}],
+  ])("throws the exact forcedChange TypeError for %s", (_name, value) => {
+    const error = captureError(() =>
+      resolvePasswordPolicyOptions({ forcedChange: value as never }),
+    );
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as TypeError).message).toBe("password-policy: forcedChange must be a boolean");
   });
 });
 

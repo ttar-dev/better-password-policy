@@ -79,6 +79,7 @@ export interface PasswordPolicyOptions {
   complexity?: PasswordComplexityOptions | false;
   history?: PasswordHistoryOptions | false;
   expiration?: PasswordExpirationOptions | false;
+  forcedChange?: boolean;
   lockout?: SignInLockoutOptions | false;
   passwordNormalization?: PasswordNormalizationForm | false;
   tenantPolicy?: TenantPasswordPolicyResolver;
@@ -111,6 +112,7 @@ export interface ResolvedPasswordPolicy {
   historyCount: number | null;
   maxAgeSeconds: number | null;
   expirationDisabled: boolean;
+  forcedChange: boolean;
   lockout: ResolvedLockout | null;
 }
 
@@ -165,6 +167,16 @@ const resolveMaxAgeSeconds = (option: PasswordPolicyOptions["expiration"]): numb
     throw invalid("expiration.maxAge must be a finite number > 0");
   }
   return option.maxAge;
+};
+
+const resolveForcedChange = (option: unknown): boolean => {
+  if (option === undefined) {
+    return true;
+  }
+  if (typeof option === "boolean") {
+    return option;
+  }
+  throw invalid("forcedChange must be a boolean");
 };
 
 const resolveLockout = (option: PasswordPolicyOptions["lockout"]): ResolvedLockout | null => {
@@ -228,6 +240,7 @@ export const resolvePasswordPolicyOptions = (options?: PasswordPolicyOptions): R
   historyCount: resolveHistoryCount(options?.history),
   maxAgeSeconds: resolveMaxAgeSeconds(options?.expiration),
   expirationDisabled: options?.expiration === false,
+  forcedChange: resolveForcedChange(options?.forcedChange),
   lockout: resolveLockout(options?.lockout),
 });
 

@@ -69,6 +69,10 @@ Table and field names can be changed with the `schema` option, for example `pass
 
 `signInLockout.lastAttemptAt` is indexed since 1.2.0, so the retention purge does not scan the table. Better Auth only checks that tables and columns exist, so a database without the index keeps working, only slower.
 
+## Upgrading to 1.3.0
+
+No schema change and no migration. With the default options the plugin behaves like 1.2.0. The new `forcedChange: false` option turns forced password change off, see [Forced change and expiry](#forced-change-and-expiry).
+
 ## Upgrading to 1.2.0
 
 Regenerate your schema and migrate to add the index on `signInLockout.lastAttemptAt`.
@@ -92,6 +96,7 @@ Sign-in responses now set a device cookie after a verified password. Set `lockou
 | `complexity.validate` | none | `({ password, user: { id, email, name } }) => boolean \| Promise<boolean>`. Return `false` to reject with `PASSWORD_REJECTED`. `user.id` is `null` while the user does not exist yet. |
 | `history` | `{ count: 5 }` | Rejects the current password and the previous `count` passwords, and keeps `count + 1` rows per user. `count: 0` rejects only the current password. `false` disables the reuse check and writes no rows. |
 | `expiration` | off | `{ maxAge }` in seconds, must be greater than 0. A password older than `maxAge` blocks authenticated routes until it is changed. Omitted: no platform limit, `passwordChangedAt` is still recorded and a tenant may set `maxAge`. `false`: passwords never expire, for every tenant. `{ maxAge }`: floor for every tenant, a tenant can only shorten it. Without `tenantPolicy`, omitted and `false` behave the same. |
+| `forcedChange` | `true` | `false` turns forced password change off: the plugin ignores and never writes `mustChangePassword`, and `auth.api.setPasswordChangeRequired` answers 400 `FORCED_PASSWORD_CHANGE_DISABLED`. `passwordChangedAt` is still recorded and the column stays in the schema. Platform-only: a tenant cannot set it. See [Forced change and expiry](#forced-change-and-expiry). |
 | `lockout` | `{ maxAttempts: 5, duration: 900, retention: 2592000, deviceCookie: { maxAge: 2592000 } }` | Seconds for `duration`. `false` registers no sign-in hooks, writes no rows, sets no cookie and runs no purge. |
 | `lockout.retention` | `2592000` | Seconds, an integer from 86400 to 315360000. Lockout rows whose last attempt is older than this and that are not locked are deleted automatically. `false` disables the purge. Platform-only: a tenant cannot set it. |
 | `lockout.deviceCookie` | `{ maxAge: 2592000 }` | `maxAge` in seconds, an integer from 1 to 34560000. After a verified password the response sets a signed device cookie that gives the browser its own attempt counter. `false` never reads or sets the cookie. Platform-only: a tenant cannot set it. |
@@ -99,9 +104,9 @@ Sign-in responses now set a device cookie after a verified password. Set `lockou
 | `tenantPolicy` | none | `(context) => override \| null \| undefined \| Promise<...>`. Returns a per-tenant override that can only tighten the options above. See [Per-tenant policy](#per-tenant-policy). |
 | `schema` | none | Rename models and fields. |
 
-Forced password change has no option: it is always available and has no effect until the application sets the flag.
+Forced password change is on by default (`forcedChange`) and has no effect until the application sets the flag. With `forcedChange: false` and passwords that cannot expire, the plugin adds no session lookup to authenticated requests.
 
-Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function, a `complexity.minLength` outside 1 to 128, a `lockout.retention` outside 86400 to 315360000, a `lockout.deviceCookie.maxAge` outside 1 to 34560000, and a `passwordNormalization` other than `false` or `"NFKC"`.
+Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function, a `complexity.minLength` outside 1 to 128, a `lockout.retention` outside 86400 to 315360000, a `lockout.deviceCookie.maxAge` outside 1 to 34560000, a `forcedChange` that is not a boolean, and a `passwordNormalization` other than `false` or `"NFKC"`.
 
 Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters, combining marks and digits are Unicode aware: a nonspacing or spacing combining mark (`Mn`, `Mc`, for example a Thai vowel or tone mark, or an accent) is never a symbol, while a space and an enclosing mark (`Me`, for example the keycap in `1️⃣`) count as symbols. Personal info tokens come from the email local part and the name (lowercased, normalized to NFC with `İ` folded to `i`, the same as the password, split on characters that are not letters, nonspacing or spacing marks, or digits, tokens of at least 3 code points, marks included); the password is rejected if it contains any token. The email domain is not used. With `passwordNormalization` on, the email and the name are first normalized the same way as the password. Names written in Thai and other scripts that use combining marks are matched whole.
 
@@ -155,10 +160,13 @@ All errors are `APIError`s whose `body.code` is the key below. The codes are exp
 | `PASSWORD_REUSED` | 400 | Password was used recently, choose a different password |
 | `PASSWORD_CHANGE_REQUIRED` | 403 | Password change required |
 | `PASSWORD_EXPIRED` | 403 | Password expired, change it to continue |
+| `FORCED_PASSWORD_CHANGE_DISABLED` | 400 | Forced password change is disabled |
 | `SIGN_IN_LOCKED` | 429 | Too many failed sign-in attempts, try again later |
 | `PASSWORD_POLICY_UNAVAILABLE` | 503 | Password policy is unavailable, try again later |
 
 `complexity.minLength` rejects with Better Auth's own `PASSWORD_TOO_SHORT` (400), not a code of this plugin. `PASSWORD_POLICY_UNAVAILABLE` is only thrown when `tenantPolicy` fails, see [Per-tenant policy](#per-tenant-policy).
+
+`FORCED_PASSWORD_CHANGE_DISABLED` is only thrown by `auth.api.setPasswordChangeRequired` when `forcedChange` is `false`.
 
 ## Server-only endpoints
 
@@ -170,7 +178,7 @@ The plugin has no HTTP routes. These endpoints exist only on `auth.api` so that 
 | `auth.api.unlockSignIn` | `body: { userId }` | `{ status: true }` |
 | `auth.api.getPasswordPolicyStatus` | `query: { userId }` | `{ mustChangePassword, passwordChangedAt, passwordExpiresAt, passwordChangeRequirement, lockedUntil, failedSignInAttempts, policy }` |
 
-An unknown `userId` fails with 404 `USER_NOT_FOUND`. A failing `tenantPolicy` fails with 503 `PASSWORD_POLICY_UNAVAILABLE`.
+An unknown `userId` fails with 404 `USER_NOT_FOUND`. A failing `tenantPolicy` fails with 503 `PASSWORD_POLICY_UNAVAILABLE`. With `forcedChange: false`, `setPasswordChangeRequired` answers 400 `FORCED_PASSWORD_CHANGE_DISABLED` before looking the user up and writes nothing, and `getPasswordPolicyStatus` reports `mustChangePassword: false` and never `forced`.
 
 `unlockSignIn` deletes the user's identifier rows and device rows. It does not revoke device cookies. `lockedUntil` and `failedSignInAttempts` cover the user's identifier rows and the device rows of that user.
 
@@ -201,7 +209,17 @@ export async function forcePasswordChange(headers: Headers, userId: string) {
 
 `mustChangePassword` and `passwordChangedAt` are returned on the session user. While a change is required, every authenticated route that has an HTTP path answers 403 `PASSWORD_CHANGE_REQUIRED` (flag) or `PASSWORD_EXPIRED` (age). If both apply, the flag wins. Routes needed to recover stay open: `/change-password`, `/sign-out`, `/get-session`, `/admin/stop-impersonating`, the sign-in, sign-up, password reset, email verification and OTP routes. The full list is exported as `PASSWORD_CHANGE_EXEMPT_PATHS`. Server-only endpoints (no HTTP path) are never gated.
 
+The gate is registered only when it can block a request: when `forcedChange` is on (the default), when `expiration` has a `maxAge`, or when `expiration` is omitted and `tenantPolicy` is set, because a tenant may then set `maxAge`. Otherwise no gate runs. The gate reads the session again from the database on every gated request, once for the session cookie and once more when a bearer token is sent.
+
 The gate checks these sessions: the session cookie, the `Authorization: Bearer <token>` session that the `bearer()` plugin derives (listed before or after `passwordPolicy()`), and a session that a hook running before `passwordPolicy()` already loaded. If any of them belongs to a user who must change the password, the request is blocked, even when Better Auth would act as the other user. A client that sends one user's cookie together with another user's bearer token must stop sending the cookie (for example `credentials: "omit"`), or that user must change the password using the cookie alone. This applies to `auth.handler` and `auth.api.*` calls. Not covered: a before-hook other than `bearer()` that rewrites request headers to switch the session (including your own `hooks.before`), a before-hook listed after `passwordPolicy()` that sets the session directly (for example `apiKey` sessions), `multiSession` inactive sessions (the `_multi-*` cookies), and the impersonating admin's own session (the `admin_session` cookie). List plugins that set the session directly before `passwordPolicy()`.
+
+With `forcedChange: false` the plugin neither reads nor writes `mustChangePassword`: the gate and `getPasswordPolicyStatus` ignore it, a password change leaves it as it is, and `setPasswordChangeRequired` answers 400 `FORCED_PASSWORD_CHANGE_DISABLED`. `passwordChangedAt` is still recorded on every covered path, so expiry and the device cookie binding keep working. Flags already stored are ignored while it is off, are no longer cleared by a password change, and apply again if it is turned back on. Clear them when you switch it off:
+
+```sql
+update "user" set must_change_password = false where must_change_password;
+```
+
+`getPasswordChangeRequirement` does not know the option and still returns `forced` for a record whose flag is set.
 
 Changing the password through any covered path sets `passwordChangedAt` and clears the flag, except `/admin/create-user` and `/admin/set-user-password`, which set a temporary password and keep the flag.
 
@@ -298,7 +316,7 @@ Return `null` or `undefined` for no override. Anything else must be an object th
 | `lockout.maxAttempts` | smaller | integer 1 to 100 |
 | `lockout.duration` | larger | integer 1 to 86400 seconds |
 
-Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate`, `lockout.retention`, `lockout.deviceCookie` and `passwordNormalization` are platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
+Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate`, `lockout.retention`, `lockout.deviceCookie`, `passwordNormalization` and `forcedChange` are platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
 
 The callback receives a `context` with:
 
@@ -329,7 +347,7 @@ Failure is closed: if the callback throws, rejects or returns an invalid overrid
 | Sign-in | 503 before anything is reserved or verified |
 | Expiry gate | 503 on gated routes (not on the exempt routes, and not when a password change is already forced) |
 | Status | 503 |
-| History pruning after a password write | Pruning is skipped and every row is kept; `passwordChangedAt`, the forced-change flag and the lockout rows are still updated |
+| History pruning after a password write | Pruning is skipped and every row is kept; `passwordChangedAt`, the forced-change flag (with `forcedChange` on) and the lockout rows are still updated |
 
 A tenant store outage therefore blocks, for every user including users without a tenant: authenticated requests of users who have a `passwordChangedAt`, every password sign-in while `lockout` is on, and every sign-up, password change and reset while `complexity` or `history` is on. Do not call a gated `auth.api` method from the callback: it runs the gate again and recurses. Do not trust request fields a caller can forge (headers, host) to choose the tenant at sign-up or sign-in; derive it from data you control.
 

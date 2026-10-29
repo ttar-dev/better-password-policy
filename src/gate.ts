@@ -33,11 +33,14 @@ export const PASSWORD_CHANGE_EXEMPT_PATHS: readonly string[] = [
   "/admin/stop-impersonating",
 ];
 
-const toRequirementInput = (user: unknown): { mustChangePassword: boolean; passwordChangedAt: Date | string | null } => {
+const toRequirementInput = (
+  user: unknown,
+  forcedChange: boolean,
+): { mustChangePassword: boolean; passwordChangedAt: Date | string | null } => {
   const fields = toRecord(user);
   const changedAt = fields.passwordChangedAt;
   return {
-    mustChangePassword: fields.mustChangePassword === true,
+    mustChangePassword: forcedChange && fields.mustChangePassword === true,
     passwordChangedAt: changedAt instanceof Date || typeof changedAt === "string" ? changedAt : null,
   };
 };
@@ -87,7 +90,7 @@ const requirementFor = async (
   user: unknown,
 ): Promise<PasswordChangeRequirement> => {
   const { base } = effectivePolicy;
-  const input = toRequirementInput(user);
+  const input = toRequirementInput(user, base.forcedChange);
   const underBase = getPasswordChangeRequirement(input, base.maxAgeSeconds);
   if (underBase !== null || !effectivePolicy.tenantAware || base.expirationDisabled || input.passwordChangedAt === null) {
     return underBase;
@@ -125,6 +128,12 @@ const strictestRequirement = async (
   }
   return strictest;
 };
+
+export const canRequirePasswordChange = ({
+  base,
+  tenantAware,
+}: Pick<EffectivePolicyResolver, "base" | "tenantAware">): boolean =>
+  base.forcedChange || base.maxAgeSeconds !== null || (tenantAware && !base.expirationDisabled);
 
 export const createPasswordChangeGate = (effectivePolicy: EffectivePolicyResolver) => ({
   matcher: (context: { path?: string | undefined }): boolean =>

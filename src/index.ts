@@ -2,7 +2,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { mergeSchema } from "better-auth/db";
 import { createPasswordPolicyEndpoints } from "./endpoints.ts";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
-import { createPasswordChangeGate } from "./gate.ts";
+import { canRequirePasswordChange, createPasswordChangeGate } from "./gate.ts";
 import { createSignInLockoutHooks } from "./lockout.ts";
 import {
   resolveLockoutPlatformSettings,
@@ -28,6 +28,7 @@ export const passwordPolicy = (options?: PasswordPolicyOptions) => {
   const passwordNormalization = resolvePasswordNormalizationOption(options?.passwordNormalization);
   const normalizePassword = createPasswordNormalizer(passwordNormalization);
   const passwordWriteTargets: PasswordWriteTargets = new WeakMap();
+  const passwordChangeGate = canRequirePasswordChange(effectivePolicy) ? createPasswordChangeGate(effectivePolicy) : null;
   const lockoutPlatform = resolveLockoutPlatformSettings(options?.lockout, policy.lockout);
   const lockoutHooks =
     policy.lockout === null || lockoutPlatform === null
@@ -63,7 +64,7 @@ export const passwordPolicy = (options?: PasswordPolicyOptions) => {
     },
     hooks: {
       before: [
-        createPasswordChangeGate(effectivePolicy),
+        ...(passwordChangeGate === null ? [] : [passwordChangeGate]),
         ...(lockoutHooks === null ? [] : [lockoutHooks.before]),
         ...(policy.complexity === null ? [] : [createAdminCreateUserPolicyHook(effectivePolicy, normalizePassword)]),
       ],

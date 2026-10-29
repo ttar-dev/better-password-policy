@@ -63,10 +63,11 @@ export const recordCredentialPasswordWrite = async (
       }
     }
 
-    const keepsForcedChange = endpointPath !== undefined && ADMIN_PASSWORD_PATHS.includes(endpointPath);
+    const clearsForcedChange =
+      base.forcedChange && !(endpointPath !== undefined && ADMIN_PASSWORD_PATHS.includes(endpointPath));
     const updatedUser = await authContext.internalAdapter.updateUser(userId, {
       passwordChangedAt: now,
-      ...(keepsForcedChange ? {} : { mustChangePassword: false }),
+      ...(clearsForcedChange ? { mustChangePassword: false } : {}),
     });
     if (updatedUser) {
       await deleteUserLockoutRows(adapter, authContext.secret, toRecord(updatedUser));

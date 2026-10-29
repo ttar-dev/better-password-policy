@@ -1,6 +1,7 @@
 import { BASE_ERROR_CODES } from "@better-auth/core/error";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import * as z from "zod";
+import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { deleteUserLockoutRows, readUserLockoutState } from "./lockout.ts";
 import { toRecord } from "./record.ts";
 import { getPasswordChangeRequirement, getPasswordExpiresAt } from "./requirement.ts";
@@ -25,6 +26,9 @@ export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyRe
       body: z.object({ userId: z.string(), required: z.boolean() }),
     },
     async (ctx) => {
+      if (!effectivePolicy.base.forcedChange) {
+        throw APIError.from("BAD_REQUEST", PASSWORD_POLICY_ERROR_CODES.FORCED_PASSWORD_CHANGE_DISABLED);
+      }
       const user = await ctx.context.internalAdapter.findUserById(ctx.body.userId);
       if (!user) {
         throw APIError.from("NOT_FOUND", BASE_ERROR_CODES.USER_NOT_FOUND);
@@ -62,7 +66,7 @@ export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyRe
         { authContext: ctx.context, endpoint: { context: ctx.context, headers: ctx.headers, request: ctx.request } },
         { kind: "user", record: fields },
       );
-      const mustChangePassword = fields.mustChangePassword === true;
+      const mustChangePassword = effectivePolicy.base.forcedChange && fields.mustChangePassword === true;
       const passwordChangedAt = toDateOrNull(fields.passwordChangedAt);
       const lockoutState =
         effective.lockout === null

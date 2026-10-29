@@ -397,6 +397,32 @@ describe("mergeTenantPasswordPolicy carry-over and purity", () => {
   });
 });
 
+describe("mergeTenantPasswordPolicy with forcedChange", () => {
+  it("carries forcedChange false through a merge whatever the tenant sends", () => {
+    const base = baseFrom({ forcedChange: false });
+    const overrides: TenantPasswordPolicyOverride[] = [
+      {},
+      { expiration: { maxAge: 86400 } },
+      { complexity: { minLength: 20, requireSymbol: true }, history: { count: 10 } },
+      { lockout: { maxAttempts: 1, duration: 3600 } },
+    ];
+    for (const override of overrides) {
+      expect(mergeTenantPasswordPolicy(base, override).forcedChange).toBe(false);
+    }
+  });
+
+  it("carries forcedChange true through a merge", () => {
+    expect(merged(undefined, { expiration: { maxAge: 86400 } }).forcedChange).toBe(true);
+    expect(merged({ forcedChange: true }, {}).forcedChange).toBe(true);
+  });
+
+  it("rejects forcedChange in a tenant override", () => {
+    expect(validateTenantPasswordPolicyOverride({ forcedChange: true }).success).toBe(false);
+    expect(validateTenantPasswordPolicyOverride({ forcedChange: false }).success).toBe(false);
+    expect(invalidPaths({ forcedChange: true })).toEqual(["forcedChange"]);
+  });
+});
+
 describe("toEffectivePasswordPolicy", () => {
   it("renders the default policy as the documented JSON shape", () => {
     expect(toEffectivePasswordPolicy(baseFrom(), DEFAULT_LENGTHS)).toEqual({

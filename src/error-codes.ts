@@ -10,6 +10,7 @@ export const PASSWORD_POLICY_ERROR_CODES = defineErrorCodes({
   PASSWORD_REUSED: "Password was used recently, choose a different password",
   PASSWORD_CHANGE_REQUIRED: "Password change required",
   PASSWORD_EXPIRED: "Password expired, change it to continue",
+  FORCED_PASSWORD_CHANGE_DISABLED: "Forced password change is disabled",
   SIGN_IN_LOCKED: "Too many failed sign-in attempts, try again later",
   PASSWORD_POLICY_UNAVAILABLE: "Password policy is unavailable, try again later",
 });

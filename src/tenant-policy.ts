@@ -123,6 +123,7 @@ export const mergeTenantPasswordPolicy = (
     base.historyCount === null ? null : Math.max(base.historyCount, override.history?.count ?? base.historyCount),
   maxAgeSeconds: base.expirationDisabled ? null : smallest(base.maxAgeSeconds, override.expiration?.maxAge ?? null),
   expirationDisabled: base.expirationDisabled,
+  forcedChange: base.forcedChange,
   lockout:
     base.lockout === null
       ? null

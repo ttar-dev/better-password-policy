@@ -17,6 +17,7 @@ import {
   validateTenantPasswordPolicyOverride as clientValidateTenantPasswordPolicyOverride,
   TENANT_PASSWORD_POLICY_LIMITS as CLIENT_TENANT_PASSWORD_POLICY_LIMITS,
 } from "../../src/client.ts";
+import type { PasswordPolicyOptions } from "../../src/index.ts";
 
 describe("passwordPolicy factory", () => {
   it("has the plugin id password-policy", () => {
@@ -228,6 +229,118 @@ describe("passwordPolicy factory with passwordNormalization", () => {
   });
 });
 
+describe("passwordPolicy factory with forcedChange", () => {
+  type HookLike = { matcher: (context: { path: string }) => boolean };
+  const tenantPolicy = () => null;
+  const MAX_AGE = { maxAge: 3600 };
+
+  const gateCount = (plugin: ReturnType<typeof passwordPolicy>): number =>
+    (plugin.hooks.before as HookLike[]).filter((hook) => hook.matcher({ path: "/list-sessions" })).length;
+
+  type Row = [
+    string,
+    boolean | undefined,
+    PasswordPolicyOptions["expiration"],
+    boolean,
+    boolean,
+  ];
+
+  const rows: Row[] = [
+    ["off, expiration false, no tenant", false, false, false, false],
+    ["off, expiration omitted, no tenant", false, undefined, false, false],
+    ["off, expiration maxAge, no tenant", false, MAX_AGE, false, true],
+    ["off, expiration false, tenant", false, false, true, false],
+    ["off, expiration omitted, tenant", false, undefined, true, true],
+    ["off, expiration maxAge, tenant", false, MAX_AGE, true, true],
+    ...([undefined, true] as const).flatMap((forcedChange) =>
+      ([false, undefined, MAX_AGE] as const).flatMap((expiration) =>
+        ([false, true] as const).map(
+          (tenant): Row => [
+            `${forcedChange === undefined ? "omitted" : "on"}, expiration ${
+              expiration === false ? "false" : expiration === undefined ? "omitted" : "maxAge"
+            }, ${tenant ? "tenant" : "no tenant"}`,
+            forcedChange,
+            expiration,
+            tenant,
+            true,
+          ],
+        ),
+      ),
+    ),
+  ];
+
+  it.each(rows)(
+    "registers the gate as expected with forcedChange %s",
+    (_name, forcedChange, expiration, tenant, gateExpected) => {
+      const plugin = passwordPolicy({
+        ...(forcedChange === undefined ? {} : { forcedChange }),
+        ...(expiration === undefined ? {} : { expiration }),
+        ...(tenant ? { tenantPolicy } : {}),
+      });
+      expect(gateCount(plugin)).toBe(gateExpected ? 1 : 0);
+      expect(plugin.hooks.before).toHaveLength(gateExpected ? 3 : 2);
+      expect(plugin.hooks.after).toHaveLength(1);
+      if (gateExpected) {
+        expect((plugin.hooks.before as HookLike[])[0]?.matcher({ path: "/list-sessions" })).toBe(true);
+      }
+    },
+  );
+
+  it("registers no before or after hooks when forcedChange, lockout, complexity and expiration are all off", () => {
+    const plugin = passwordPolicy({
+      forcedChange: false,
+      expiration: false,
+      lockout: false,
+      complexity: false,
+    });
+    expect(plugin.hooks.before).toHaveLength(0);
+    expect(plugin.hooks.after).toHaveLength(0);
+  });
+
+  it("keeps the same three server-only endpoints without an http path when forcedChange is off", () => {
+    const endpoints = passwordPolicy({ forcedChange: false }).endpoints as Record<
+      string,
+      { path?: string; options: { metadata?: { SERVER_ONLY?: boolean } } }
+    >;
+    expect(Object.keys(endpoints).sort()).toEqual(
+      ["getPasswordPolicyStatus", "setPasswordChangeRequired", "unlockSignIn"].sort(),
+    );
+    for (const endpoint of Object.values(endpoints)) {
+      expect(endpoint.path).toBeUndefined();
+      expect(endpoint.options.metadata?.SERVER_ONLY).toBe(true);
+    }
+  });
+
+  it("keeps the schema the same when forcedChange is off", () => {
+    const plugin = passwordPolicy({ forcedChange: false });
+    expect(Object.keys(plugin.schema).sort()).toEqual(Object.keys(passwordPolicy().schema).sort());
+    expect(Object.keys(plugin.schema.user.fields).sort()).toEqual(
+      ["mustChangePassword", "passwordChangedAt"].sort(),
+    );
+  });
+
+  it.each([
+    ["null", null],
+    ["the string false", "false"],
+    ["zero", 0],
+    ["one", 1],
+    ["an empty object", {}],
+  ])("throws a password-policy TypeError at construction when forcedChange is %s", (_name, value) => {
+    let thrown: unknown;
+    try {
+      passwordPolicy({ forcedChange: value as never });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+
+  it("rejects forcedChange in a tenant override", () => {
+    expect(validateTenantPasswordPolicyOverride({ forcedChange: false }).success).toBe(false);
+  });
+});
+
 describe("passwordPolicySchema", () => {
   it("defines the user columns as optional and not settable by input", () => {
     expect(passwordPolicySchema.user.fields.mustChangePassword).toMatchObject({
@@ -283,6 +396,7 @@ describe("PASSWORD_POLICY_ERROR_CODES", () => {
     PASSWORD_REUSED: "Password was used recently, choose a different password",
     PASSWORD_CHANGE_REQUIRED: "Password change required",
     PASSWORD_EXPIRED: "Password expired, change it to continue",
+    FORCED_PASSWORD_CHANGE_DISABLED: "Forced password change is disabled",
     SIGN_IN_LOCKED: "Too many failed sign-in attempts, try again later",
     PASSWORD_POLICY_UNAVAILABLE: "Password policy is unavailable, try again later",
   };
