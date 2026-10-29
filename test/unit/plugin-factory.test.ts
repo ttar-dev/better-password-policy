@@ -181,6 +181,53 @@ describe("passwordPolicy factory with tenantPolicy", () => {
   });
 });
 
+describe("passwordPolicy factory with passwordNormalization", () => {
+  it("registers the same hook counts as without the option", () => {
+    const plugin = passwordPolicy({ passwordNormalization: "NFKC" });
+    expect(plugin.hooks.before).toHaveLength(3);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("registers the same hook counts when the option is false", () => {
+    const plugin = passwordPolicy({ passwordNormalization: false });
+    expect(plugin.hooks.before).toHaveLength(3);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("keeps only the gate when lockout and complexity are off", () => {
+    const plugin = passwordPolicy({ passwordNormalization: "NFKC", lockout: false, complexity: false });
+    expect(plugin.hooks.before).toHaveLength(1);
+    expect(plugin.hooks.after).toHaveLength(0);
+  });
+
+  it("keeps the schema and the endpoints the same", () => {
+    const plugin = passwordPolicy({ passwordNormalization: "NFKC" });
+    expect(Object.keys(plugin.schema).sort()).toEqual(Object.keys(passwordPolicy().schema).sort());
+    expect(Object.keys(plugin.endpoints).sort()).toEqual(Object.keys(passwordPolicy().endpoints).sort());
+  });
+
+  it.each([
+    ["true", true],
+    ["NFKD", "NFKD"],
+    ["nfkc", "nfkc"],
+    ["null", null],
+    ["a number", 1],
+  ])("throws a password-policy TypeError at construction when the option is %s", (_name, value) => {
+    let thrown: unknown;
+    try {
+      passwordPolicy({ passwordNormalization: value as never });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+
+  it("rejects passwordNormalization in a tenant override", () => {
+    expect(validateTenantPasswordPolicyOverride({ passwordNormalization: "NFKC" }).success).toBe(false);
+  });
+});
+
 describe("passwordPolicySchema", () => {
   it("defines the user columns as optional and not settable by input", () => {
     expect(passwordPolicySchema.user.fields.mustChangePassword).toMatchObject({

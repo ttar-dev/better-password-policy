@@ -73,11 +73,14 @@ export type TenantPasswordPolicyResolver = (
   context: TenantPasswordPolicyContext,
 ) => TenantPasswordPolicyOverride | null | undefined | Promise<TenantPasswordPolicyOverride | null | undefined>;
 
+export type PasswordNormalizationForm = "NFKC";
+
 export interface PasswordPolicyOptions {
   complexity?: PasswordComplexityOptions | false;
   history?: PasswordHistoryOptions | false;
   expiration?: PasswordExpirationOptions | false;
   lockout?: SignInLockoutOptions | false;
+  passwordNormalization?: PasswordNormalizationForm | false;
   tenantPolicy?: TenantPasswordPolicyResolver;
   schema?: InferOptionSchema<PasswordPolicySchema>;
 }
@@ -238,4 +241,14 @@ export const resolveTenantPolicyOption = (option: unknown): TenantPasswordPolicy
     throw invalid("tenantPolicy must be a function");
   }
   return option;
+};
+
+export const resolvePasswordNormalizationOption = (option: unknown): PasswordNormalizationForm | null => {
+  if (option === undefined || option === false) {
+    return null;
+  }
+  if (option === "NFKC") {
+    return option;
+  }
+  throw invalid('passwordNormalization must be false or "NFKC"');
 };

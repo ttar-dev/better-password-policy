@@ -5,6 +5,8 @@ import type { DBAdapter } from "better-auth/types";
 import { findComplexityViolation, isPasswordTooShort } from "./complexity.ts";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import type { ResolvedPasswordPolicy } from "./options.ts";
+import { SIGN_IN_PATHS } from "./lockout.ts";
+import type { PasswordNormalizer, PasswordVerifier } from "./password-normalization.ts";
 import { isPolicedPasswordContext, resolvePasswordTarget } from "./password-targets.ts";
 import type { PasswordTarget } from "./password-targets.ts";
 import { toRecord } from "./record.ts";
@@ -17,9 +19,18 @@ export interface PasswordWriteTarget {
 
 export type PasswordWriteTargets = WeakMap<object, PasswordWriteTarget>;
 
-type PasswordVerifier = (input: { hash: string; password: string }) => Promise<boolean>;
+export interface PasswordCandidate {
+  typed: string;
+  normalized: string;
+  normalize: PasswordNormalizer;
+}
 
 type PolicyTarget = Exclude<PasswordTarget, { kind: "unauthorized" }>;
+
+const normalizePersonalInfo = (target: PolicyTarget, normalize: PasswordNormalizer) => ({
+  email: target.email === null ? null : normalize(target.email),
+  name: target.name === null ? null : normalize(target.name),
+});
 
 const rejectWith = (code: keyof typeof PASSWORD_POLICY_ERROR_CODES) =>
   APIError.from("BAD_REQUEST", PASSWORD_POLICY_ERROR_CODES[code]);
@@ -57,22 +68,26 @@ export const isPasswordReused = async (
 };
 
 export const assertPasswordAllowed = async (
-  password: string,
+  candidate: PasswordCandidate,
   target: PolicyTarget,
   policy: ResolvedPasswordPolicy,
   authContext: Pick<AuthEndpointContext["context"], "adapter" | "password">,
 ): Promise<void> => {
   if (policy.complexity !== null) {
-    if (isPasswordTooShort(password, policy.complexity.minLength)) {
+    if (isPasswordTooShort(candidate.normalized, policy.complexity.minLength)) {
       throw APIError.from("BAD_REQUEST", BASE_ERROR_CODES.PASSWORD_TOO_SHORT);
     }
-    const violation = findComplexityViolation(password, policy.complexity, target);
+    const violation = findComplexityViolation(
+      candidate.normalized,
+      policy.complexity,
+      normalizePersonalInfo(target, candidate.normalize),
+    );
     if (violation !== null) {
       throw rejectWith(violation);
     }
     if (policy.complexity.validate !== null) {
       const accepted = await policy.complexity.validate({
-        password,
+        password: candidate.normalized,
         user: {
           id: target.kind === "existing-user" ? target.userId : null,
           email: target.email,
@@ -91,7 +106,7 @@ export const assertPasswordAllowed = async (
       target.currentPasswordHash,
       policy.historyCount,
     );
-    if (await isPasswordReused(password, hashes, (input) => authContext.password.verify(input))) {
+    if (await isPasswordReused(candidate.typed, hashes, (input) => authContext.password.verify(input))) {
       throw rejectWith("PASSWORD_REUSED");
     }
   }
@@ -102,15 +117,28 @@ export const createPolicyEnforcingHash =
     originalHash: (password: string) => Promise<string>,
     effectivePolicy: EffectivePolicyResolver,
     passwordWriteTargets: PasswordWriteTargets,
+    normalizePassword: PasswordNormalizer,
+    hashesAsTypedForSignInTiming: boolean,
   ) =>
   async (password: string): Promise<string> => {
+    const normalized = normalizePassword(password);
     const c = tryGetCurrentAuthEndpointContext();
+    const endpointPath = c?.path;
     if (!isPolicedPasswordContext(c)) {
-      return originalHash(password);
+      const passwordHash = await originalHash(normalized);
+      if (
+        hashesAsTypedForSignInTiming &&
+        normalized !== password &&
+        endpointPath !== undefined &&
+        SIGN_IN_PATHS.includes(endpointPath)
+      ) {
+        await originalHash(password);
+      }
+      return passwordHash;
     }
     const target = await resolvePasswordTarget(c);
     if (target.kind === "unauthorized") {
-      return originalHash(password);
+      return originalHash(normalized);
     }
     const { base } = effectivePolicy;
     const policy =
@@ -122,15 +150,18 @@ export const createPolicyEnforcingHash =
               : { kind: "anonymous", email: target.email?.toLowerCase() ?? null },
           )
         : base;
-    await assertPasswordAllowed(password, target, policy, c.context);
-    const passwordHash = await originalHash(password);
+    await assertPasswordAllowed({ typed: password, normalized, normalize: normalizePassword }, target, policy, c.context);
+    const passwordHash = await originalHash(normalized);
     if (target.kind === "existing-user") {
       passwordWriteTargets.set(c, { userId: target.userId, passwordHash });
     }
     return passwordHash;
   };
 
-export const createAdminCreateUserPolicyHook = (effectivePolicy: EffectivePolicyResolver) => ({
+export const createAdminCreateUserPolicyHook = (
+  effectivePolicy: EffectivePolicyResolver,
+  normalizePassword: PasswordNormalizer,
+) => ({
   matcher: (context: { path?: string | undefined }): boolean => context.path === "/admin/create-user",
   handler: createAuthMiddleware(async (ctx) => {
     const body = toRecord(ctx.body);
@@ -144,7 +175,7 @@ export const createAdminCreateUserPolicyHook = (effectivePolicy: EffectivePolicy
       { kind: "anonymous", email: email?.toLowerCase() ?? null },
     );
     await assertPasswordAllowed(
-      password,
+      { typed: password, normalized: normalizePassword(password), normalize: normalizePassword },
       {
         kind: "new-user",
         email,

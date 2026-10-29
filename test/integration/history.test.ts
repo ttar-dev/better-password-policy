@@ -2,9 +2,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   createAuthRegistry,
   expectBadRequest,
+  expectUnauthorized,
   pause,
+  DEFAULT_EMAIL,
   DEFAULT_PASSWORD,
   GOOD_PASSWORDS,
+  WRONG_PASSWORD,
 } from "../harness/create-test-auth.ts";
 import type { TestAuth } from "../harness/create-test-auth.ts";
 
@@ -260,6 +263,57 @@ describe("account updates that are not credential password writes", () => {
     await t.context.internalAdapter.updateAccount(account.id, { accessToken: "token-3" });
     expect(await t.historyRows(user.id)).toHaveLength(rowsBefore.length);
     expect((await t.getUser(user.id)).passwordChangedAt).toEqual(before.passwordChangedAt);
+  });
+});
+
+describe("credential password writes outside an endpoint", () => {
+  const prepare = async () => {
+    const t = await open();
+    const user = await t.signUp({ password: P0 });
+    await expectUnauthorized(
+      () => t.auth.api.signInEmail({ body: { email: DEFAULT_EMAIL, password: WRONG_PASSWORD } }),
+      "INVALID_EMAIL_OR_PASSWORD",
+    );
+    await t.updateUserRow(user.id, { mustChangePassword: true });
+    await pause();
+    return {
+      t,
+      user,
+      historyBefore: await t.historyRows(user.id),
+      userBefore: await t.getUser(user.id),
+      lockoutBefore: await t.lockoutRows(),
+    };
+  };
+
+  it("resolves internalAdapter.updatePassword, writes the account password and records nothing", async () => {
+    const { t, user, historyBefore, userBefore, lockoutBefore } = await prepare();
+    await t.context.internalAdapter.updatePassword(user.id, "fast:Other1Pass");
+    expect((await t.getCredentialAccount(user.id)).password).toBe("fast:Other1Pass");
+    expect(await t.historyRows(user.id)).toEqual(historyBefore);
+    const userAfter = await t.getUser(user.id);
+    expect(userAfter.passwordChangedAt).toEqual(userBefore.passwordChangedAt);
+    expect(userAfter.mustChangePassword).toBe(true);
+    expect(await t.lockoutRows()).toEqual(lockoutBefore);
+  });
+
+  it("resolves internalAdapter.updateAccount with a password, writes it and records nothing", async () => {
+    const { t, user, historyBefore, userBefore, lockoutBefore } = await prepare();
+    const account = await t.getCredentialAccount(user.id);
+    await t.context.internalAdapter.updateAccount(account.id, { password: "fast:Another2Pass" });
+    expect((await t.getCredentialAccount(user.id)).password).toBe("fast:Another2Pass");
+    expect(await t.historyRows(user.id)).toEqual(historyBefore);
+    const userAfter = await t.getUser(user.id);
+    expect(userAfter.passwordChangedAt).toEqual(userBefore.passwordChangedAt);
+    expect(userAfter.mustChangePassword).toBe(true);
+    expect(await t.lockoutRows()).toEqual(lockoutBefore);
+  });
+
+  it("lets the user sign in with the password written outside an endpoint", async () => {
+    const t = await open();
+    const user = await t.signUp({ password: P0 });
+    await t.context.internalAdapter.updatePassword(user.id, `fast:${P1}`);
+    const result = await t.auth.api.signInEmail({ body: { email: DEFAULT_EMAIL, password: P1 } });
+    expect(result.user.id).toBe(user.id);
   });
 });
 

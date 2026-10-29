@@ -103,8 +103,8 @@ export const createPasswordWriteHooks = (
         },
       },
       update: {
-        before: async (data: Record<string, unknown>, context: object | null): Promise<void> => {
-          if (context === null) {
+        before: async (data: Record<string, unknown>, context: object | null | undefined): Promise<void> => {
+          if (context === null || context === undefined) {
             return;
           }
           const password = readNonEmptyString(data, "password");
@@ -112,8 +112,8 @@ export const createPasswordWriteHooks = (
             pendingPasswordHashes.set(context, password);
           }
         },
-        after: async (result: unknown, context: PolicyEndpointContext | null): Promise<void> => {
-          if (context === null) {
+        after: async (result: unknown, context: PolicyEndpointContext | null | undefined): Promise<void> => {
+          if (context === null || context === undefined) {
             return;
           }
           const pendingHash = pendingPasswordHashes.get(context);

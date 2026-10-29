@@ -95,18 +95,50 @@ Sign-in responses now set a device cookie after a verified password. Set `lockou
 | `lockout` | `{ maxAttempts: 5, duration: 900, retention: 2592000, deviceCookie: { maxAge: 2592000 } }` | Seconds for `duration`. `false` registers no sign-in hooks, writes no rows, sets no cookie and runs no purge. |
 | `lockout.retention` | `2592000` | Seconds, an integer from 86400 to 315360000. Lockout rows whose last attempt is older than this and that are not locked are deleted automatically. `false` disables the purge. Platform-only: a tenant cannot set it. |
 | `lockout.deviceCookie` | `{ maxAge: 2592000 }` | `maxAge` in seconds, an integer from 1 to 34560000. After a verified password the response sets a signed device cookie that gives the browser its own attempt counter. `false` never reads or sets the cookie. Platform-only: a tenant cannot set it. |
+| `passwordNormalization` | `false` | `"NFKC"` normalizes every password to Unicode NFKC inside `password.hash` and `password.verify`, so the same password typed in a different Unicode form matches. `false` leaves passwords as typed. Platform-only: a tenant cannot set it. See [Password normalization](#password-normalization). |
 | `tenantPolicy` | none | `(context) => override \| null \| undefined \| Promise<...>`. Returns a per-tenant override that can only tighten the options above. See [Per-tenant policy](#per-tenant-policy). |
 | `schema` | none | Rename models and fields. |
 
 Forced password change has no option: it is always available and has no effect until the application sets the flag.
 
-Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function, a `complexity.minLength` outside 1 to 128, a `lockout.retention` outside 86400 to 315360000, and a `lockout.deviceCookie.maxAge` outside 1 to 34560000.
+Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function, a `complexity.minLength` outside 1 to 128, a `lockout.retention` outside 86400 to 315360000, a `lockout.deviceCookie.maxAge` outside 1 to 34560000, and a `passwordNormalization` other than `false` or `"NFKC"`.
 
-Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters, combining marks and digits are Unicode aware: a nonspacing or spacing combining mark (`Mn`, `Mc`, for example a Thai vowel or tone mark, or an accent) is never a symbol, while a space and an enclosing mark (`Me`, for example the keycap in `1️⃣`) count as symbols. Personal info tokens come from the email local part and the name (lowercased, normalized to NFC with `İ` folded to `i`, the same as the password, split on characters that are not letters, nonspacing or spacing marks, or digits, tokens of at least 3 code points, marks included); the password is rejected if it contains any token. The email domain is not used. Names written in Thai and other scripts that use combining marks are matched whole.
+Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters, combining marks and digits are Unicode aware: a nonspacing or spacing combining mark (`Mn`, `Mc`, for example a Thai vowel or tone mark, or an accent) is never a symbol, while a space and an enclosing mark (`Me`, for example the keycap in `1️⃣`) count as symbols. Personal info tokens come from the email local part and the name (lowercased, normalized to NFC with `İ` folded to `i`, the same as the password, split on characters that are not letters, nonspacing or spacing marks, or digits, tokens of at least 3 code points, marks included); the password is rejected if it contains any token. The email domain is not used. With `passwordNormalization` on, the email and the name are first normalized the same way as the password. Names written in Thai and other scripts that use combining marks are matched whole.
 
 Since 1.2.0, nonspacing and spacing combining marks no longer count as symbols and no longer split personal info tokens; a password that was accepted before can now be rejected for `PASSWORD_MISSING_SYMBOL` or `PASSWORD_CONTAINS_PERSONAL_INFO`. Names and passwords are compared in NFC, so a name stored with decomposed accents (`e` followed by U+0301) or Thai marks typed in a different order match the same name in the password; a password with the unaccented name is still accepted. Stored passwords are not re-checked.
 
 Where the policy is enforced: `/sign-up/email`, `/change-password`, `/reset-password`, `/email-otp/reset-password`, `/phone-number/reset-password`, `/admin/set-user-password`, `/admin/create-user` (complexity, including `minLength`, but no history) and the server-only `auth.api.setPassword`. Sign-in never runs complexity or history checks.
+
+## Password normalization
+
+`passwordNormalization: "NFKC"` applies Unicode NFKC normalization, as NIST SP 800-63B recommends for passwords that accept Unicode, before a password is checked, hashed or verified. It sits inside `password.hash` (and, with a custom hasher, `password.verify`), so it covers every Better Auth path that hashes or verifies a password: sign-up, the email, username and phone sign-ins, change, set and reset password, the admin endpoints, `/verify-password`, the two-factor password checks and user deletion. Application code that calls `ctx.context.password.hash` gets the normalized hash too.
+
+```ts
+passwordPolicy({ passwordNormalization: "NFKC" });
+```
+
+The plugin treats the hasher as Better Auth's default only when `password.verify` is Better Auth's own function at the moment the plugin initializes; a plugin listed before `passwordPolicy` that only wraps `password.hash`, such as `haveIBeenPwned`, keeps that. Any other verifier (a custom `emailAndPassword.password`, or a plugin listed before `passwordPolicy` that replaces or wraps `password.verify`) gets the as-typed fallback and the extra unknown-account sign-in hash described below.
+
+Better Auth's default password hasher already applies NFKC inside both hash and verify, so with it a password typed in a different Unicode form already matches. The option then makes this plugin's checks (`complexity.minLength`, character classes, personal info, `complexity.validate` and history) evaluate the same NFKC form that is hashed. With any other hasher the option also normalizes before hashing and verifying: enable it when users type passwords outside ASCII, in particular Thai, because keyboards and input methods produce different code points for text that looks the same, and with a custom hasher that does not normalize the user is told the password is wrong.
+
+| Typed | Normalized |
+| --- | --- |
+| `ำ` (U+0E33) | `ํ` + `า` (U+0E4D U+0E32) |
+| `ู` + `้` or `้` + `ู` | `ู` + `้` |
+| `e` + U+0301 | `é` |
+| `Ａ` `１` (fullwidth) | `A` `1` |
+| `ﬁ`, `²`, no-break space | `fi`, `2`, space |
+
+NFKC does not make every pair that renders alike equal: `ํ` typed before a tone mark (`น` + `ํ` + `้` + `า`) stays different from `น้ำ`. Every ASCII password is unchanged by NFKC.
+
+- Every plugin check sees the normalized password: `complexity.minLength`, character classes, personal info (the email and the name are normalized the same way before they are compared), `complexity.validate` (it receives the normalized password) and history. The normalized password is what gets hashed.
+- Better Auth's own `minPasswordLength` and `maxPasswordLength` count the password as typed. NFKC can lengthen (`ﬁ`, `ำ`) or shorten (`e` + U+0301) a password, so the two minimums can disagree. Browser-side checks should call `password.normalize("NFKC")` first.
+- Hashes made before enabling keep working. With a custom hasher, verification tries the normalized password and, only if that fails and normalization changed the password, the password as typed. An unchanged password costs one verification; a changed one costs two when it is wrong or matches a hash made before the option. A failed sign-in counts as one failed attempt and a match in either form counts as the correct password. Stored hashes are not rewritten until the user next sets a password.
+- The history check uses the same rule with a custom hasher: up to two verifications per stored hash for a changed password, and a password stored before the option is still recognized when typed the same way. A password stored before the option was on and typed now in its normalized form (rather than the original form) is not recognized as reused until a new hash is stored. With the default hasher, verification already compares the NFKC forms, so every form of a password matches its stored hash.
+- Only with a custom hasher: an email or username sign-in for an unknown account hashes once more when normalization changes the password, so response time does not reveal whether the account exists. With the default hasher there is no extra verification or hash.
+- With a custom hasher, do not turn it off again once users have set passwords with it on: a user whose password normalization changes (for example any Thai password with `ำ`) cannot sign in until the password is reset. With the default hasher turning it off is safe, because Better Auth normalizes inside hash and verify anyway.
+- Plugins that wrap `password.hash` see the password as they receive it: list `haveIBeenPwned` before `passwordPolicy` so it checks the normalized password. Listed after, it checks the password as typed.
+- Platform-only: hashing and verification run before the user and tenant are known, so a tenant cannot set it.
 
 ## Error codes
 
@@ -235,6 +267,7 @@ where (locked_until is null or locked_until < now())
 - A user who can sign in with email, username and phone gets up to `3 * maxAttempts` attempts per lock window from untrusted clients, because the three identifiers are counted separately, plus `maxAttempts` for every trusted device. Locking one identifier does not lock the others.
 - Anyone can lock any identifier by failing sign-ins for it. This is inherent to account lockout, but the owner on a trusted device keeps access. Combine with IP rate limiting.
 - The correct password with an error that is not about the password (banned user, unverified email, two-factor required) resets the counter and is never counted. Requests that never reach password verification (validation errors, unknown account, account without a password, an unverified phone number when the phoneNumber plugin has `requireVerification`) are counted.
+- The username counter uses the value the username plugin looks the user up with (`usernameNormalization`, applied twice with `validationOrder.username: "pre-normalization"`, like the plugin does), lowercased. With `usernameNormalization: false` or a normalizer that keeps case, usernames that differ only in case share one counter, so failed attempts on one count against the other; this keeps a case-insensitive database from giving every case variant its own counter.
 - Rotating the Better Auth secret (or its first entry in `secrets`) changes every stored identifier: counters restart, current locks are released and every device cookie becomes invalid.
 
 ## Per-tenant policy
@@ -265,7 +298,7 @@ Return `null` or `undefined` for no override. Anything else must be an object th
 | `lockout.maxAttempts` | smaller | integer 1 to 100 |
 | `lockout.duration` | larger | integer 1 to 86400 seconds |
 
-Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate`, `lockout.retention` and `lockout.deviceCookie` are platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
+Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate`, `lockout.retention`, `lockout.deviceCookie` and `passwordNormalization` are platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
 
 The callback receives a `context` with:
 
@@ -324,7 +357,9 @@ Notes:
 
 Put any plugin whose before-hook can reject or short-circuit a sign-in (for example `captcha`) before `passwordPolicy` in the `plugins` array. The lockout reserves an attempt in its before-hook and clears it in its after-hook only when the correct password was verified, so a request rejected by a before-hook that runs after `passwordPolicy` also counts as a failed attempt.
 
-`passwordPolicy` works in any order relative to `twoFactor` and `haveIBeenPwned`.
+A plugin that replaces `password.hash` or `password.verify` instead of wrapping them must be listed before `passwordPolicy`. Listed after, it replaces the policy's hash and every policy check is skipped.
+
+`passwordPolicy` works in any order relative to `twoFactor`, and relative to `haveIBeenPwned` unless `passwordNormalization` is on: then list `haveIBeenPwned` before `passwordPolicy`.
 
 The after-hook of the lockout sets the device cookie, so keep `nextCookies()` last in the `plugins` array.
 

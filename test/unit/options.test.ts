@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolvePasswordPolicyOptions } from "../../src/options.ts";
+import { resolvePasswordNormalizationOption, resolvePasswordPolicyOptions } from "../../src/options.ts";
 import type { PasswordPolicyOptions } from "../../src/index.ts";
 
 const captureError = (run: () => unknown): unknown => {
@@ -191,5 +191,46 @@ describe("resolvePasswordPolicyOptions validation", () => {
     const error = captureError(() => resolvePasswordPolicyOptions(options));
     expect(error).toBeInstanceOf(TypeError);
     expect((error as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+});
+
+describe("resolvePasswordNormalizationOption", () => {
+  it.each([
+    ["undefined", undefined],
+    ["false", false],
+  ])("resolves %s to null", (_name, option) => {
+    expect(resolvePasswordNormalizationOption(option)).toBeNull();
+  });
+
+  it("resolves NFKC to NFKC", () => {
+    expect(resolvePasswordNormalizationOption("NFKC")).toBe("NFKC");
+  });
+
+  it.each([
+    ["true", true],
+    ["NFKD", "NFKD"],
+    ["NFC", "NFC"],
+    ["lowercase nfkc", "nfkc"],
+    ["null", null],
+    ["a number", 1],
+    ["an empty string", ""],
+    ["an object", { form: "NFKC" }],
+  ])("throws a password-policy TypeError for %s", (_name, option) => {
+    const error = captureError(() => resolvePasswordNormalizationOption(option));
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as TypeError).message).toBe(
+      'password-policy: passwordNormalization must be false or "NFKC"',
+    );
+  });
+});
+
+describe("resolvePasswordPolicyOptions with passwordNormalization", () => {
+  it("leaves the resolved policy unchanged", () => {
+    expect(resolvePasswordPolicyOptions({ passwordNormalization: "NFKC" })).toEqual(
+      resolvePasswordPolicyOptions(),
+    );
+    expect(resolvePasswordPolicyOptions({ passwordNormalization: false })).toEqual(
+      resolvePasswordPolicyOptions(),
+    );
   });
 });

@@ -4,10 +4,20 @@ import { createPasswordPolicyEndpoints } from "./endpoints.ts";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { createPasswordChangeGate } from "./gate.ts";
 import { createSignInLockoutHooks } from "./lockout.ts";
-import { resolveLockoutPlatformSettings, resolvePasswordPolicyOptions, resolveTenantPolicyOption } from "./options.ts";
+import {
+  resolveLockoutPlatformSettings,
+  resolvePasswordNormalizationOption,
+  resolvePasswordPolicyOptions,
+  resolveTenantPolicyOption,
+} from "./options.ts";
 import type { PasswordPolicyOptions } from "./options.ts";
 import { createAdminCreateUserPolicyHook, createPolicyEnforcingHash } from "./password-hash.ts";
 import type { PasswordWriteTargets } from "./password-hash.ts";
+import {
+  createNormalizingVerify,
+  createPasswordNormalizer,
+  usesDefaultPasswordVerifier,
+} from "./password-normalization.ts";
 import { createPasswordWriteHooks } from "./password-writes.ts";
 import { passwordPolicySchema } from "./schema.ts";
 import { createEffectivePolicyResolver } from "./tenant-resolver.ts";
@@ -15,6 +25,8 @@ import { createEffectivePolicyResolver } from "./tenant-resolver.ts";
 export const passwordPolicy = (options?: PasswordPolicyOptions) => {
   const policy = resolvePasswordPolicyOptions(options);
   const effectivePolicy = createEffectivePolicyResolver(policy, resolveTenantPolicyOption(options?.tenantPolicy));
+  const passwordNormalization = resolvePasswordNormalizationOption(options?.passwordNormalization);
+  const normalizePassword = createPasswordNormalizer(passwordNormalization);
   const passwordWriteTargets: PasswordWriteTargets = new WeakMap();
   const lockoutPlatform = resolveLockoutPlatformSettings(options?.lockout, policy.lockout);
   const lockoutHooks =
@@ -25,15 +37,23 @@ export const passwordPolicy = (options?: PasswordPolicyOptions) => {
   return {
     id: "password-policy",
     init(authContext) {
+      const verifierNormalizesItself = usesDefaultPasswordVerifier(authContext.password);
+      const verifyPassword =
+        passwordNormalization === null || verifierNormalizesItself
+          ? authContext.password.verify
+          : createNormalizingVerify(authContext.password.verify, normalizePassword);
       return {
         context: {
           password: {
             ...authContext.password,
-            hash: createPolicyEnforcingHash(authContext.password.hash, effectivePolicy, passwordWriteTargets),
-            verify:
-              lockoutHooks === null
-                ? authContext.password.verify
-                : lockoutHooks.trackVerifiedPassword(authContext.password.verify),
+            hash: createPolicyEnforcingHash(
+              authContext.password.hash,
+              effectivePolicy,
+              passwordWriteTargets,
+              normalizePassword,
+              !verifierNormalizesItself,
+            ),
+            verify: lockoutHooks === null ? verifyPassword : lockoutHooks.trackVerifiedPassword(verifyPassword),
           },
         },
         options: {
@@ -45,7 +65,7 @@ export const passwordPolicy = (options?: PasswordPolicyOptions) => {
       before: [
         createPasswordChangeGate(effectivePolicy),
         ...(lockoutHooks === null ? [] : [lockoutHooks.before]),
-        ...(policy.complexity === null ? [] : [createAdminCreateUserPolicyHook(effectivePolicy)]),
+        ...(policy.complexity === null ? [] : [createAdminCreateUserPolicyHook(effectivePolicy, normalizePassword)]),
       ],
       after: [...(lockoutHooks === null ? [] : [lockoutHooks.after])],
     },
@@ -81,6 +101,7 @@ export type {
   PasswordComplexityOptions,
   PasswordExpirationOptions,
   PasswordHistoryOptions,
+  PasswordNormalizationForm,
   PasswordPolicyOptions,
   PasswordValidationInput,
   SignInDeviceCookieOptions,

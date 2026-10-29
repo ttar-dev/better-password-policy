@@ -20,8 +20,6 @@ import type { EffectivePolicyResolver, PolicySubject } from "./tenant-resolver.t
 
 export const SIGN_IN_PATHS: readonly string[] = ["/sign-in/email", "/sign-in/username", "/sign-in/phone-number"];
 
-export type UsernameNormalizer = (username: string) => string;
-
 interface LockoutRow {
   id: string;
   identifier: string;
@@ -35,53 +33,33 @@ export interface LockoutState {
   failedAttempts: number;
 }
 
-const isUsernameNormalizer = (value: unknown): value is UsernameNormalizer => typeof value === "function";
-
-const normalizeUsername = (raw: string, normalizer: UsernameNormalizer | undefined): string => {
-  if (normalizer === undefined) {
-    return raw;
-  }
-  const normalized = normalizer(raw);
-  return typeof normalized === "string" ? normalized : raw;
-};
-
-export const signInLockoutIdentifier = (
-  path: string | undefined,
-  body: unknown,
-  normalizer?: UsernameNormalizer,
-): string | null => {
-  const fields = toRecord(body);
-  switch (path) {
-    case "/sign-in/email": {
-      const email = readNonEmptyString(fields, "email");
-      return email === null ? null : `email:${email.toLowerCase()}`;
-    }
-    case "/sign-in/username": {
-      const username = readNonEmptyString(fields, "username");
-      if (username === null) {
-        return null;
-      }
-      const normalized = normalizeUsername(username, normalizer).toLowerCase();
-      return normalized === "" ? null : `username:${normalized}`;
-    }
-    case "/sign-in/phone-number": {
-      const phoneNumber = readNonEmptyString(fields, "phoneNumber");
-      return phoneNumber === null ? null : `phone:${phoneNumber}`;
-    }
-    default:
-      return null;
-  }
-};
-
 export interface SignInUserLookup {
   field: "email" | "username" | "phoneNumber";
   value: string;
 }
 
+export const usernameLookupValue = (username: string, usernameOptions: unknown): string => {
+  const options = toRecord(usernameOptions);
+  const configured = options.usernameNormalization;
+  const normalize = (value: string): string => {
+    if (configured === false) {
+      return value;
+    }
+    if (typeof configured === "function") {
+      const normalized: unknown = configured(value);
+      return typeof normalized === "string" ? normalized : value;
+    }
+    return value.toLowerCase();
+  };
+  return toRecord(options.validationOrder).username === "pre-normalization"
+    ? normalize(normalize(username))
+    : normalize(username);
+};
+
 export const signInUserLookup = (
   path: string | undefined,
   body: unknown,
-  usernameNormalization: unknown,
+  usernameOptions?: unknown,
 ): SignInUserLookup | null => {
   const fields = toRecord(body);
   switch (path) {
@@ -94,13 +72,8 @@ export const signInUserLookup = (
       if (username === null) {
         return null;
       }
-      const normalized =
-        usernameNormalization === false
-          ? username
-          : isUsernameNormalizer(usernameNormalization)
-            ? normalizeUsername(username, usernameNormalization)
-            : username.toLowerCase();
-      return normalized === "" ? null : { field: "username", value: normalized };
+      const value = usernameLookupValue(username, usernameOptions);
+      return value === "" ? null : { field: "username", value };
     }
     case "/sign-in/phone-number": {
       const phoneNumber = readNonEmptyString(fields, "phoneNumber");
@@ -108,6 +81,25 @@ export const signInUserLookup = (
     }
     default:
       return null;
+  }
+};
+
+export const signInLockoutIdentifier = (
+  path: string | undefined,
+  body: unknown,
+  usernameOptions?: unknown,
+): string | null => {
+  const lookup = signInUserLookup(path, body, usernameOptions);
+  if (lookup === null) {
+    return null;
+  }
+  switch (lookup.field) {
+    case "email":
+      return `email:${lookup.value}`;
+    case "username":
+      return `username:${lookup.value.toLowerCase()}`;
+    case "phoneNumber":
+      return `phone:${lookup.value}`;
   }
 };
 
@@ -222,21 +214,10 @@ export const createSignInLockoutHooks = (
       return verified;
     };
 
-  const resolveIdentifier = (
-    path: string | undefined,
-    body: unknown,
-    plugin: { options?: unknown } | null,
-  ): string | null => {
-    const normalization = toRecord(plugin?.options).usernameNormalization;
-    return signInLockoutIdentifier(path, body, isUsernameNormalizer(normalization) ? normalization : undefined);
-  };
+  const usernameOptionsOf = (ctx: SignInHookContext): unknown => ctx.context.getPlugin("username")?.options;
 
   const userLookupOf = (ctx: SignInHookContext): SignInUserLookup | null =>
-    signInUserLookup(
-      ctx.path,
-      ctx.body,
-      toRecord(ctx.context.getPlugin("username")?.options).usernameNormalization,
-    );
+    signInUserLookup(ctx.path, ctx.body, usernameOptionsOf(ctx));
 
   const findSignInUser = (ctx: SignInHookContext): Promise<Record<string, unknown> | null> => {
     const cached = signInUserByRequest.get(ctx.context);
@@ -342,7 +323,7 @@ export const createSignInLockoutHooks = (
       if (purgeStaleRows !== null) {
         await purgeStaleRows(ctx.context);
       }
-      const identifier = resolveIdentifier(ctx.path, ctx.body, ctx.context.getPlugin("username"));
+      const identifier = signInLockoutIdentifier(ctx.path, ctx.body, usernameOptionsOf(ctx));
       if (identifier === null) {
         return;
       }

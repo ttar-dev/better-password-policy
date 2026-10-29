@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { createRequire } from "node:module";
 import { expect } from "vitest";
 import { betterAuth } from "better-auth";
+import type { BetterAuthPlugin } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin, username, phoneNumber, emailOTP, twoFactor, testUtils, bearer } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
@@ -49,6 +50,8 @@ export const WEAK_NO_DIGIT = "Weakpassx";
 export interface TestAuthOptions {
   policy?: PasswordPolicyOptions;
   realHasher?: boolean;
+  recordBaseHasherCalls?: boolean;
+  replaceHasherBeforePolicy?: boolean;
   policyBeforeTwoFactor?: boolean;
   requireEmailVerification?: boolean;
   cookieCache?: boolean;
@@ -58,6 +61,7 @@ export interface TestAuthOptions {
   sessionUpdateAge?: number;
   rewriteSignInErrors?: boolean;
   usernamePosition?: "before-policy" | "after-policy";
+  usernameOptions?: Parameters<typeof username>[0];
   userBeforeHook?: ReturnType<typeof createAuthMiddleware>;
   backgroundTasks?: (promise: Promise<unknown>) => void;
 }
@@ -211,17 +215,64 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
   }
 
   let verifyCallCount = 0;
+  const hashedPasswords: string[] = [];
+  const verifiedPasswords: string[] = [];
   const resetTokens: { email: string; token: string }[] = [];
   const phoneOtps: { phoneNumber: string; code: string }[] = [];
   const emailOtps: { email: string; otp: string; type: string }[] = [];
 
   const fastPassword = {
-    hash: async (password: string) => `fast:${password}`,
+    hash: async (password: string) => {
+      hashedPasswords.push(password);
+      return `fast:${password}`;
+    },
     verify: async ({ hash, password }: { hash: string; password: string }) => {
       verifyCallCount += 1;
+      verifiedPasswords.push(password);
       return hash === `fast:${password}`;
     },
   };
+
+  const baseHashedPasswords: string[] = [];
+  const baseVerifiedPasswords: string[] = [];
+  const baseHasherRecorder = {
+    id: "base-hasher-recorder",
+    init(initContext) {
+      const originalHash = initContext.password.hash;
+      const originalVerify = initContext.password.verify;
+      return {
+        context: {
+          password: {
+            ...initContext.password,
+            hash: async (password: string) => {
+              baseHashedPasswords.push(password);
+              return originalHash(password);
+            },
+            verify: async (input: { hash: string; password: string }) => {
+              baseVerifiedPasswords.push(input.password);
+              return originalVerify(input);
+            },
+          },
+        },
+      };
+    },
+  } satisfies BetterAuthPlugin;
+
+  const nonNormalizingHasherReplacer = {
+    id: "non-normalizing-hasher-replacer",
+    init(initContext) {
+      return {
+        context: {
+          password: {
+            ...initContext.password,
+            hash: async (password: string) => `plain:${password}`,
+            verify: async ({ hash, password }: { hash: string; password: string }) =>
+              hash === `plain:${password}`,
+          },
+        },
+      };
+    },
+  } satisfies BetterAuthPlugin;
 
   const policy = passwordPolicy(options.policy);
   const phonePlugin = phoneNumber({
@@ -240,8 +291,8 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
 
   const policyPlugins = options.withoutPolicy ? [] : [policy];
   const usernameAfterPolicy = options.usernamePosition === "after-policy";
-  const usernameBeforePolicy = usernameAfterPolicy ? [] : [username()];
-  const usernameBehindPolicy = usernameAfterPolicy ? [username()] : [];
+  const usernameBeforePolicy = usernameAfterPolicy ? [] : [username(options.usernameOptions)];
+  const usernameBehindPolicy = usernameAfterPolicy ? [username(options.usernameOptions)] : [];
   const basePlugins = options.policyBeforeTwoFactor
     ? [
         admin(),
@@ -263,12 +314,18 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
         ...usernameBehindPolicy,
         testUtils(),
       ];
-  const plugins =
+  const positionedPlugins =
     options.bearerPosition === "before-policy"
       ? [bearer(), ...basePlugins]
       : options.bearerPosition === "after-policy"
         ? [...basePlugins, bearer()]
         : basePlugins;
+  const recordedPlugins = options.recordBaseHasherCalls
+    ? [baseHasherRecorder, ...positionedPlugins]
+    : positionedPlugins;
+  const plugins = options.replaceHasherBeforePolicy
+    ? [nonNormalizingHasherReplacer, ...recordedPlugins]
+    : recordedPlugins;
 
   const rewriteSignInErrors = createAuthMiddleware(async (hookContext) => {
     const returned = hookContext.context.returned;
@@ -534,6 +591,10 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
     lastPhoneCode,
     lastEmailOtp,
     verifyCalls: () => verifyCallCount,
+    hashInputs: () => [...hashedPasswords],
+    verifyInputs: () => [...verifiedPasswords],
+    baseHashInputs: () => [...baseHashedPasswords],
+    baseVerifyInputs: () => [...baseVerifiedPasswords],
     close,
   };
 };
