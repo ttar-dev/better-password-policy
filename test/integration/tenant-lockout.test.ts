@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   createAuthRegistry,
+  deviceCookieHeadersFrom,
+  deviceSetCookieFrom,
   expectServiceUnavailable,
   expectTooManyRequests,
   expectUnauthorized,
@@ -305,5 +307,116 @@ describe("tenant lockout with lockout switched off", () => {
     }
     expect(await t.lockoutRows()).toHaveLength(0);
     expect(probe.calls).toHaveLength(0);
+  });
+});
+
+describe("tenant lockout on the trusted device path", () => {
+  const obtainDevice = async (t: TestAuth) =>
+    deviceCookieHeadersFrom(
+      (
+        await t.auth.api.signInEmail({
+          body: { email: DEFAULT_EMAIL, password: DEFAULT_PASSWORD },
+          returnHeaders: true,
+        })
+      ).headers,
+    );
+
+  const wrongWith = (t: TestAuth, device: Headers) =>
+    expectUnauthorized(
+      () =>
+        t.auth.api.signInEmail({
+          body: { email: DEFAULT_EMAIL, password: WRONG_PASSWORD },
+          headers: device,
+        }),
+      "INVALID_EMAIL_OR_PASSWORD",
+    );
+
+  it("locks the device at the tenant maxAttempts with the tenant duration and leaves the identifier row untouched", async () => {
+    let strictId = "";
+    const probe = createProbe(strictFor(() => [strictId], { maxAttempts: 2, duration: 3600 }));
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    const user = await t.signUp();
+    strictId = user.id;
+    const device = await obtainDevice(t);
+    const startedAt = Date.now();
+    await wrongWith(t, device);
+    await wrongWith(t, device);
+
+    const [deviceRow] = await t.deviceLockoutRows(user.id);
+    expect(deviceRow?.failedAttempts).toBe(2);
+    expect(deviceRow?.lockedUntil).toBeInstanceOf(Date);
+    expect(deviceRow!.lockedUntil!.getTime()).toBeGreaterThanOrEqual(startedAt + 3590_000);
+    expect(deviceRow!.lockedUntil!.getTime()).toBeLessThanOrEqual(Date.now() + 3605_000);
+    expect(await t.lockoutRow(EMAIL_IDENTIFIER)).toBeNull();
+  });
+
+  it("calls the callback exactly once per trusted attempt", async () => {
+    const probe = createProbe(() => null);
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    await t.signUp();
+    const device = await obtainDevice(t);
+    probe.calls.length = 0;
+    await wrongWith(t, device);
+    await wrongWith(t, device);
+    expect(probe.calls).toHaveLength(2);
+  });
+
+  it("does not call the callback and verifies no password while the device is locked", async () => {
+    let strictId = "";
+    const probe = createProbe(strictFor(() => [strictId], { maxAttempts: 2 }));
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    strictId = (await t.signUp()).id;
+    const device = await obtainDevice(t);
+    await wrongWith(t, device);
+    await wrongWith(t, device);
+    probe.calls.length = 0;
+    const verifyCallsBefore = t.verifyCalls();
+    await expectTooManyRequests(
+      () =>
+        t.auth.api.signInEmail({
+          body: { email: DEFAULT_EMAIL, password: DEFAULT_PASSWORD },
+          headers: device,
+        }),
+      "SIGN_IN_LOCKED",
+    );
+    expect(probe.calls).toHaveLength(0);
+    expect(t.verifyCalls()).toBe(verifyCallsBefore);
+  });
+
+  it("answers 503, creates no device row and verifies no password when the callback throws for a trusted request", async () => {
+    const probe = createProbe(() => null);
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    const user = await t.signUp();
+    const device = await obtainDevice(t);
+    probe.decideWith(() => {
+      throw new Error("tenant store down");
+    });
+    const verifyCallsBefore = t.verifyCalls();
+    await expectServiceUnavailable(
+      () =>
+        t.auth.api.signInEmail({
+          body: { email: DEFAULT_EMAIL, password: DEFAULT_PASSWORD },
+          headers: device,
+        }),
+      "PASSWORD_POLICY_UNAVAILABLE",
+    );
+    expect(await t.deviceLockoutRows(user.id)).toHaveLength(0);
+    expect(await t.lockoutRows()).toHaveLength(0);
+    expect(t.verifyCalls()).toBe(verifyCallsBefore);
+  });
+
+  it("sets no device cookie on the 503 answer", async () => {
+    const probe = createProbe(() => null);
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    await t.signUp();
+    probe.decideWith(() => {
+      throw new Error("tenant store down");
+    });
+    const response = await t.signInResponse("/sign-in/email", {
+      email: DEFAULT_EMAIL,
+      password: DEFAULT_PASSWORD,
+    });
+    expect(response.status).toBe(503);
+    expect(deviceSetCookieFrom(response.headers)).toBeUndefined();
   });
 });

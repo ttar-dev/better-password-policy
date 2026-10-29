@@ -28,9 +28,15 @@ export interface PasswordExpirationOptions {
   maxAge: number;
 }
 
+export interface SignInDeviceCookieOptions {
+  maxAge?: number;
+}
+
 export interface SignInLockoutOptions {
   maxAttempts?: number;
   duration?: number;
+  retention?: number | false;
+  deviceCookie?: SignInDeviceCookieOptions | false;
 }
 
 export interface TenantPasswordPolicyOverride {
@@ -92,6 +98,11 @@ export interface ResolvedLockout {
   durationSeconds: number;
 }
 
+export interface ResolvedLockoutPlatformSettings {
+  retentionSeconds: number | null;
+  deviceCookieMaxAgeSeconds: number | null;
+}
+
 export interface ResolvedPasswordPolicy {
   complexity: ResolvedComplexity | null;
   historyCount: number | null;
@@ -103,6 +114,11 @@ export interface ResolvedPasswordPolicy {
 const DEFAULT_HISTORY_COUNT = 5;
 const DEFAULT_LOCKOUT_MAX_ATTEMPTS = 5;
 const DEFAULT_LOCKOUT_DURATION_SECONDS = 900;
+const DEFAULT_LOCKOUT_RETENTION_SECONDS = 2592000;
+const MIN_LOCKOUT_RETENTION_SECONDS = 86400;
+const MAX_LOCKOUT_RETENTION_SECONDS = 315360000;
+const DEFAULT_DEVICE_COOKIE_MAX_AGE_SECONDS = 2592000;
+const MAX_DEVICE_COOKIE_MAX_AGE_SECONDS = 34560000;
 
 const invalid = (message: string) => new TypeError(`password-policy: ${message}`);
 
@@ -161,6 +177,47 @@ const resolveLockout = (option: PasswordPolicyOptions["lockout"]): ResolvedLocko
     throw invalid("lockout.duration must be a finite number > 0");
   }
   return { maxAttempts, durationSeconds };
+};
+
+const resolveRetentionSeconds = (option: SignInLockoutOptions | undefined): number | null => {
+  if (option?.retention === false) {
+    return null;
+  }
+  const retention = option?.retention ?? DEFAULT_LOCKOUT_RETENTION_SECONDS;
+  if (
+    !Number.isInteger(retention) ||
+    retention < MIN_LOCKOUT_RETENTION_SECONDS ||
+    retention > MAX_LOCKOUT_RETENTION_SECONDS
+  ) {
+    throw invalid(
+      `lockout.retention must be false or an integer between ${MIN_LOCKOUT_RETENTION_SECONDS} and ${MAX_LOCKOUT_RETENTION_SECONDS}`,
+    );
+  }
+  return retention;
+};
+
+const resolveDeviceCookieMaxAgeSeconds = (option: SignInLockoutOptions | undefined): number | null => {
+  if (option?.deviceCookie === false) {
+    return null;
+  }
+  const maxAge = option?.deviceCookie?.maxAge ?? DEFAULT_DEVICE_COOKIE_MAX_AGE_SECONDS;
+  if (!Number.isInteger(maxAge) || maxAge < 1 || maxAge > MAX_DEVICE_COOKIE_MAX_AGE_SECONDS) {
+    throw invalid(`lockout.deviceCookie.maxAge must be an integer between 1 and ${MAX_DEVICE_COOKIE_MAX_AGE_SECONDS}`);
+  }
+  return maxAge;
+};
+
+export const resolveLockoutPlatformSettings = (
+  option: PasswordPolicyOptions["lockout"],
+  lockout: ResolvedLockout | null,
+): ResolvedLockoutPlatformSettings | null => {
+  if (option === false || lockout === null) {
+    return null;
+  }
+  return {
+    retentionSeconds: resolveRetentionSeconds(option),
+    deviceCookieMaxAgeSeconds: resolveDeviceCookieMaxAgeSeconds(option),
+  };
 };
 
 export const resolvePasswordPolicyOptions = (options?: PasswordPolicyOptions): ResolvedPasswordPolicy => ({

@@ -66,6 +66,37 @@ describe("passwordPolicy factory", () => {
     expect(plugin.hooks.after).toHaveLength(0);
   });
 
+  it("registers the same hook counts with every lockout hardening option set", () => {
+    const plugin = passwordPolicy({
+      lockout: { retention: 86400, deviceCookie: { maxAge: 3600 } },
+    });
+    expect(plugin.hooks.before).toHaveLength(3);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("registers the same hook counts when retention and the device cookie are switched off", () => {
+    const plugin = passwordPolicy({ lockout: { retention: false, deviceCookie: false } });
+    expect(plugin.hooks.before).toHaveLength(3);
+    expect(plugin.hooks.after).toHaveLength(1);
+  });
+
+  it("drops the lockout hooks when lockout is off even if nothing else is configured", () => {
+    const plugin = passwordPolicy({ lockout: false, complexity: false });
+    expect(plugin.hooks.before).toHaveLength(1);
+    expect(plugin.hooks.after).toHaveLength(0);
+  });
+
+  it("throws a password-policy TypeError when lockout.retention is below the minimum", () => {
+    let thrown: unknown;
+    try {
+      passwordPolicy({ lockout: { retention: 10 } });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as TypeError).message.startsWith("password-policy:")).toBe(true);
+  });
+
   it("drops the admin create-user hook when complexity is off", () => {
     const plugin = passwordPolicy({ complexity: false });
     expect(plugin.hooks.before).toHaveLength(2);
@@ -187,6 +218,10 @@ describe("passwordPolicySchema", () => {
     });
     expect(fields.lockedUntil).toMatchObject({ type: "date", required: false });
     expect(fields.lastAttemptAt).toMatchObject({ type: "date", required: true });
+  });
+
+  it("indexes signInLockout.lastAttemptAt so the retention purge can scan by age", () => {
+    expect(passwordPolicySchema.signInLockout.fields.lastAttemptAt).toMatchObject({ index: true });
   });
 });
 

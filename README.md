@@ -67,6 +67,21 @@ database: drizzleAdapter(db, { provider: "pg", schema })
 
 Table and field names can be changed with the `schema` option, for example `passwordPolicy({ schema: { passwordHistory: { modelName: "pw_history" } } })`.
 
+`signInLockout.lastAttemptAt` is indexed since 1.2.0, so the retention purge does not scan the table. Better Auth only checks that tables and columns exist, so a database without the index keeps working, only slower.
+
+## Upgrading to 1.2.0
+
+Regenerate your schema and migrate to add the index on `signInLockout.lastAttemptAt`.
+
+The `identifier` column of `signInLockout` no longer holds readable values. Rows written by an earlier version (`email:...`, `username:...`, `phone:...`) never match again: every counter restarts once and identifiers that are locked when you deploy are released. Delete the old rows, because they still contain personal data. During a rolling deploy, 1.0 and 1.2 instances keep separate counters (up to `2 * maxAttempts` per lock window until the rollout finishes), so run this SQL after every instance runs 1.2.0. Legacy rows are also purged automatically within `retention`.
+
+```sql
+delete from sign_in_lockout
+where identifier like 'email:%' or identifier like 'username:%' or identifier like 'phone:%';
+```
+
+Sign-in responses now set a device cookie after a verified password. Set `lockout: { deviceCookie: false }` to opt out. Rows older than `lockout.retention` (30 days by default) are now deleted automatically, see [Sign-in lockout](#sign-in-lockout).
+
 ## Options
 
 | Option | Default | Meaning |
@@ -77,13 +92,15 @@ Table and field names can be changed with the `schema` option, for example `pass
 | `complexity.validate` | none | `({ password, user: { id, email, name } }) => boolean \| Promise<boolean>`. Return `false` to reject with `PASSWORD_REJECTED`. `user.id` is `null` while the user does not exist yet. |
 | `history` | `{ count: 5 }` | Rejects the current password and the previous `count` passwords, and keeps `count + 1` rows per user. `count: 0` rejects only the current password. `false` disables the reuse check and writes no rows. |
 | `expiration` | off | `{ maxAge }` in seconds, must be greater than 0. A password older than `maxAge` blocks authenticated routes until it is changed. Omitted: no platform limit, `passwordChangedAt` is still recorded and a tenant may set `maxAge`. `false`: passwords never expire, for every tenant. `{ maxAge }`: floor for every tenant, a tenant can only shorten it. Without `tenantPolicy`, omitted and `false` behave the same. |
-| `lockout` | `{ maxAttempts: 5, duration: 900 }` | Seconds for `duration`. `false` registers no sign-in hooks and writes no rows. |
+| `lockout` | `{ maxAttempts: 5, duration: 900, retention: 2592000, deviceCookie: { maxAge: 2592000 } }` | Seconds for `duration`. `false` registers no sign-in hooks, writes no rows, sets no cookie and runs no purge. |
+| `lockout.retention` | `2592000` | Seconds, an integer from 86400 to 315360000. Lockout rows whose last attempt is older than this and that are not locked are deleted automatically. `false` disables the purge. Platform-only: a tenant cannot set it. |
+| `lockout.deviceCookie` | `{ maxAge: 2592000 }` | `maxAge` in seconds, an integer from 1 to 34560000. After a verified password the response sets a signed device cookie that gives the browser its own attempt counter. `false` never reads or sets the cookie. Platform-only: a tenant cannot set it. |
 | `tenantPolicy` | none | `(context) => override \| null \| undefined \| Promise<...>`. Returns a per-tenant override that can only tighten the options above. See [Per-tenant policy](#per-tenant-policy). |
 | `schema` | none | Rename models and fields. |
 
 Forced password change has no option: it is always available and has no effect until the application sets the flag.
 
-Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function and a `complexity.minLength` outside 1 to 128.
+Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function, a `complexity.minLength` outside 1 to 128, a `lockout.retention` outside 86400 to 315360000, and a `lockout.deviceCookie.maxAge` outside 1 to 34560000.
 
 Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters, combining marks and digits are Unicode aware: a nonspacing or spacing combining mark (`Mn`, `Mc`, for example a Thai vowel or tone mark, or an accent) is never a symbol, while a space and an enclosing mark (`Me`, for example the keycap in `1️⃣`) count as symbols. Personal info tokens come from the email local part and the name (lowercased, normalized to NFC with `İ` folded to `i`, the same as the password, split on characters that are not letters, nonspacing or spacing marks, or digits, tokens of at least 3 code points, marks included); the password is rejected if it contains any token. The email domain is not used. Names written in Thai and other scripts that use combining marks are matched whole.
 
@@ -122,6 +139,8 @@ The plugin has no HTTP routes. These endpoints exist only on `auth.api` so that 
 | `auth.api.getPasswordPolicyStatus` | `query: { userId }` | `{ mustChangePassword, passwordChangedAt, passwordExpiresAt, passwordChangeRequirement, lockedUntil, failedSignInAttempts, policy }` |
 
 An unknown `userId` fails with 404 `USER_NOT_FOUND`. A failing `tenantPolicy` fails with 503 `PASSWORD_POLICY_UNAVAILABLE`.
+
+`unlockSignIn` deletes the user's identifier rows and device rows. It does not revoke device cookies. `lockedUntil` and `failedSignInAttempts` cover the user's identifier rows and the device rows of that user.
 
 `policy` is the effective policy of that user (the platform policy merged with the tenant override), ready to show in a change-password form. `passwordExpiresAt`, `passwordChangeRequirement`, `lockedUntil` and `failedSignInAttempts` follow it too. `minLength` is the larger of Better Auth's `minPasswordLength` and `complexity.minLength`; a section is `null` when that feature is `false`; `expiration` is `null` when passwords do not expire; `duration` is in seconds; `complexity` also reports `caselessLettersSatisfyCase`; `customValidation` tells whether a `validate` function exists. With the default options and no tenant override:
 
@@ -177,23 +196,46 @@ Cookie cache: with `session.cookieCache` enabled, the session user inside the co
 
 ## Sign-in lockout
 
-Failed attempts are counted per identifier (`email:<lowercase email>`, `username:<normalized username>`, `phone:<phone number>`) on `/sign-in/email`, `/sign-in/username` and `/sign-in/phone-number`. Every sign-in attempt that does not present the correct password counts, including malformed input, unknown accounts and any error response. After `maxAttempts` such attempts the identifier is locked for `duration` seconds and further sign-ins answer 429 `SIGN_IN_LOCKED` without checking the password. Presenting the correct password always resets the counter, whatever the response is afterwards (success, two-factor, unverified email, banned user, or a response rewritten by another hook); the plugin decides this from the password verification itself, not from the response. Resetting the password and `auth.api.unlockSignIn` also delete the user's rows. Counting is atomic: an attempt is reserved before the password is verified, so concurrent requests cannot verify more than `maxAttempts` passwords per lock window.
+Failed attempts are counted on `/sign-in/email`, `/sign-in/username` and `/sign-in/phone-number`, per identifier (`email:<lowercase email>`, `username:<normalized username>`, `phone:<phone number>`) or, for a trusted device, per device. Every sign-in attempt that does not present the correct password counts, including malformed input, unknown accounts and any error response. After `maxAttempts` such attempts the counter is locked for `duration` seconds and further sign-ins on it answer 429 `SIGN_IN_LOCKED` without checking the password. Presenting the correct password always resets the counter that was used, whatever the response is afterwards (success, two-factor, unverified email, banned user, or a response rewritten by another hook); the plugin decides this from the password verification itself, not from the response. Resetting the password and `auth.api.unlockSignIn` also delete the user's rows. Counting is atomic: an attempt is reserved before the password is verified, so concurrent requests cannot verify more than `maxAttempts` passwords per lock window.
 
-Behavior to know about:
+### Stored identifiers
 
-- Counting is keyed by the identifier string, not by user, so identifiers that do not belong to any account lock exactly like real ones. Without `tenantPolicy`, the 429 therefore reveals only that this string had too many attempts, which the caller caused. It does not reveal whether an account exists.
-- With `tenantPolicy`, the plugin looks the user up by the identifier (email, normalized username or phone number) before reserving the attempt, and applies the tenant's `maxAttempts` and `duration` (stricter than the platform values only). A tenant with a lower `maxAttempts` locks a real account sooner than an unknown identifier, so an attacker can observe whether an account exists from the number of attempts before the 429. The lookup runs for every identifier so its own timing does not depend on the account; the latency of your callback is yours to keep uniform. The lookup and the callback are skipped while the identifier is already locked (the 429 answers first), and the user is looked up from the identifier, never from a header, so as long as your callback does not choose the tenant from headers, a caller cannot pick a looser tenant.
-- If `tenantPolicy` fails, the sign-in answers 503 `PASSWORD_POLICY_UNAVAILABLE` before anything is reserved or verified, so the counter does not move.
-- A user who can sign in with email, username and phone gets up to `3 * maxAttempts` attempts, because the three identifiers are counted separately. Locking one identifier does not lock the others.
-- Anyone can lock any identifier by failing sign-ins for it. This is inherent to account lockout. Combine with IP rate limiting.
-- The correct password with an error that is not about the password (banned user, unverified email, two-factor required) resets the counter and is never counted. Requests that never reach password verification (validation errors, unknown account, account without a password, an unverified phone number when the phoneNumber plugin has `requireVerification`) are counted.
-- Rows for identifiers that never succeed accumulate. Clean them up periodically:
+The `identifier` column never holds an email, username or phone number. It holds `i1:` followed by 64 hex characters (an HMAC-SHA256 of the identifier) for identifier rows, and `d1:<64 hex>:<32 hex>` (an HMAC of the user id, then the device id) for device rows. The HMAC key is derived from the Better Auth secret with HKDF-SHA256 and a purpose-specific salt and info, so it is not the key that signs cookies. This is pseudonymisation, not anonymisation: whoever holds the secret can test whether a known email or phone number has a row, and low-entropy values such as phone numbers can be brute-forced with it. Keep the secret out of the database backups that hold these rows.
+
+### Device cookie
+
+A locked identifier would otherwise lock the real owner out whenever someone else guesses their email. After a verified password the response sets the cookie `better-auth.password_policy_device` (the name follows `advanced.cookiePrefix`, `__Secure-` on HTTPS and `advanced.cookies.password_policy_device`). It is signed with the Better Auth secret and uses the default cookie attributes (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` from `lockout.deviceCookie.maxAge`). The value carries a random device id, an expiry and a binding to the user and to the user's `passwordChangedAt`.
+
+- The cookie is issued whenever the correct password was verified, also on a two-factor redirect and on a 403 for a banned user or an unverified email, and never on a failure, a 429 or a 503. Every verified sign-in rotates it.
+- A sign-in that presents a valid cookie of the same user is counted in a counter of its own, not in the identifier counter. One cookie covers the email, username and phone sign-ins of the user.
+- An owner whose identifier is locked by an attacker can still sign in from the trusted device. A trusted success resets only the device counter, never the identifier counter, otherwise an attacker would get a new guess quota every time the owner signs in.
+- A new device without the cookie during an attack is still locked, like before.
+- A device lock does not lock the identifier: the same user without the cookie can still try, and is counted under the identifier.
+- The cookie is ignored, and the attempt is counted under the identifier, when the signature is wrong, the expiry has passed, it belongs to another user than the identifier, or the user changed the password after it was issued (any covered password path sets `passwordChangedAt`). Rotating the secret invalidates every cookie.
+- A browser holds one cookie. When another user signs in successfully on the same browser, that user owns the cookie and the previous user is untrusted there until the next sign-in.
+- Clients that do not keep cookies (bearer-only native apps, server code calling `auth.api.signInEmail` without forwarding the request headers and the `Set-Cookie` of the response) are always untrusted and are counted per identifier.
+- There is no server state for the cookie and no revocation of a single cookie. It stops working at `maxAge`, on password change or on secret rotation.
+- `lockout: { deviceCookie: false }` never reads or sets it.
+
+### Retention
+
+Rows of identifiers and devices that never succeed would accumulate, so the plugin deletes rows whose last attempt is older than `lockout.retention` (30 days by default) and that are not locked. A row that is still locked is never deleted. The purge runs at most once an hour per plugin instance (not per process), so create the auth instance once instead of per request, or set `advanced.backgroundTasks.handler`. It is triggered by a sign-in request (also a rejected one), in the background when `advanced.backgroundTasks.handler` is set and otherwise before that request continues. A failure is logged and never fails a sign-in. `retention: false` disables it, and then you can clean up yourself:
 
 ```sql
 delete from sign_in_lockout
 where (locked_until is null or locked_until < now())
   and last_attempt_at < now() - interval '30 days';
 ```
+
+### Behavior to know about
+
+- Counting is keyed by the identifier, not by user, so identifiers that do not belong to any account lock exactly like real ones. Without `tenantPolicy`, the 429 therefore reveals only that this string had too many attempts, which the caller caused. It does not reveal whether an account exists. Without `tenantPolicy`, the plugin looks the user up before the password check only when the request carries a validly signed, unexpired device cookie (also when the counter is locked, because the lookup decides which counter applies), and after the check only when the password was correct, to issue the cookie. A wrong password without such a cookie triggers no lookup by the plugin.
+- With `tenantPolicy`, the plugin looks the user up by the identifier (email, normalized username or phone number) before reserving the attempt, and applies the tenant's `maxAttempts` and `duration` (stricter than the platform values only), also for a device counter. A tenant with a lower `maxAttempts` locks a real account sooner than an unknown identifier, so an attacker can observe whether an account exists from the number of attempts before the 429. The lookup runs for every identifier so its own timing does not depend on the account; the latency of your callback is yours to keep uniform. The callback is skipped while the counter being used is locked (the 429 answers first), and the user is looked up from the identifier, never from a header, so as long as your callback does not choose the tenant from headers, a caller cannot pick a looser tenant.
+- If `tenantPolicy` fails, the sign-in answers 503 `PASSWORD_POLICY_UNAVAILABLE` before anything is reserved or verified, so the counter does not move.
+- A user who can sign in with email, username and phone gets up to `3 * maxAttempts` attempts per lock window from untrusted clients, because the three identifiers are counted separately, plus `maxAttempts` for every trusted device. Locking one identifier does not lock the others.
+- Anyone can lock any identifier by failing sign-ins for it. This is inherent to account lockout, but the owner on a trusted device keeps access. Combine with IP rate limiting.
+- The correct password with an error that is not about the password (banned user, unverified email, two-factor required) resets the counter and is never counted. Requests that never reach password verification (validation errors, unknown account, account without a password, an unverified phone number when the phoneNumber plugin has `requireVerification`) are counted.
+- Rotating the Better Auth secret (or its first entry in `secrets`) changes every stored identifier: counters restart, current locks are released and every device cookie becomes invalid.
 
 ## Per-tenant policy
 
@@ -223,7 +265,7 @@ Return `null` or `undefined` for no override. Anything else must be an object th
 | `lockout.maxAttempts` | smaller | integer 1 to 100 |
 | `lockout.duration` | larger | integer 1 to 86400 seconds |
 
-Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate` is platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
+Bounds are inclusive and exported as `TENANT_PASSWORD_POLICY_LIMITS`. `complexity.validate`, `lockout.retention` and `lockout.deviceCookie` are platform-only. A feature the platform set to `false` stays off: its override is ignored and the callback is not called for it.
 
 The callback receives a `context` with:
 
@@ -244,7 +286,7 @@ The callback receives a `context` with:
 | Expiry gate | session user | user email |
 | Status | user row | user email |
 
-When it is called: only when the answer can matter, and at most once per user per request (the result is cached for the request). It is not called when no `tenantPolicy` is set, when every feature is `false`, for the hash check when complexity is `false` and history does not apply, for the expiry gate when the user is already forced or expired under the platform policy, has no `passwordChangedAt` or passwords never expire, for lockout while the identifier is locked, and for history pruning when the user has no more rows than the platform keeps. The expiry gate runs on nearly every authenticated request, so cache the tenant lookup. The plugin applies no timeout to the callback.
+When it is called: only when the answer can matter, and at most once per user per request (the result is cached for the request). It is not called when no `tenantPolicy` is set, when every feature is `false`, for the hash check when complexity is `false` and history does not apply, for the expiry gate when the user is already forced or expired under the platform policy, has no `passwordChangedAt` or passwords never expire, for lockout while the counter being used is locked, and for history pruning when the user has no more rows than the platform keeps. The expiry gate runs on nearly every authenticated request, so cache the tenant lookup. The plugin applies no timeout to the callback.
 
 Failure is closed: if the callback throws, rejects or returns an invalid override, the plugin logs the error and answers 503 `PASSWORD_POLICY_UNAVAILABLE`; it never falls back to the platform policy.
 
@@ -284,6 +326,8 @@ Put any plugin whose before-hook can reject or short-circuit a sign-in (for exam
 
 `passwordPolicy` works in any order relative to `twoFactor` and `haveIBeenPwned`.
 
+The after-hook of the lockout sets the device cookie, so keep `nextCookies()` last in the `plugins` array.
+
 ## Limitations
 
 - Password writes made by calling `internalAdapter.updatePassword` or `internalAdapter.updateAccount` directly, outside an endpoint, are not recorded in the history and do not update `passwordChangedAt`. Account creation is always recorded.
@@ -293,5 +337,8 @@ Put any plugin whose before-hook can reject or short-circuit a sign-in (for exam
 - With `/email-otp/reset-password`, Better Auth consumes the OTP up front only when it does not match. A valid OTP stays usable after the policy rejects the new password, so the user can retry with a stronger one.
 - An admin session impersonating a flagged user is gated like that user, except `/admin/stop-impersonating`, which stays open.
 - The server-only `auth.api.setPassword` answers 400 `PASSWORD_ALREADY_SET` for any password when the user already has one, exactly like Better Auth, and applies the policy only when the user has no password yet.
+- Clients that do not keep cookies (bearer-only native apps, server code that does not forward headers and `Set-Cookie`) never get a trusted device and are counted per identifier.
+- Password writes outside an endpoint do not change `passwordChangedAt`, so they do not invalidate device cookies.
+- On Postgres, finding the device rows of a user (`starts_with` on `identifier`) can scan the lockout table sequentially; it happens on password writes, `unlockSignIn`, the status endpoint and user deletion. On Postgres, when the database collation is not C, create `create index on sign_in_lockout (identifier text_pattern_ops);` so these per-user device-row lookups stay indexed.
 - A `complexity.minLength` (platform or tenant) above Better Auth's `maxPasswordLength` makes passwords impossible to set.
 - The `user` the expiry gate passes to `tenantPolicy` is the session user, so fields with `returned: false` are absent.

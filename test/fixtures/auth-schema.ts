@@ -124,13 +124,17 @@ export const passwordHistory = pgTable(
   (table) => [index("passwordHistory_userId_idx").on(table.userId)],
 );
 
-export const signInLockout = pgTable("sign_in_lockout", {
-  id: text("id").primaryKey(),
-  identifier: text("identifier").notNull().unique(),
-  failedAttempts: integer("failed_attempts").default(0).notNull(),
-  lockedUntil: timestamp("locked_until"),
-  lastAttemptAt: timestamp("last_attempt_at").notNull(),
-});
+export const signInLockout = pgTable(
+  "sign_in_lockout",
+  {
+    id: text("id").primaryKey(),
+    identifier: text("identifier").notNull().unique(),
+    failedAttempts: integer("failed_attempts").default(0).notNull(),
+    lockedUntil: timestamp("locked_until"),
+    lastAttemptAt: timestamp("last_attempt_at").notNull(),
+  },
+  (table) => [index("signInLockout_lastAttemptAt_idx").on(table.lastAttemptAt)],
+);
 
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),

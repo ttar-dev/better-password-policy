@@ -1,7 +1,7 @@
 import { BASE_ERROR_CODES } from "@better-auth/core/error";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import * as z from "zod";
-import { deleteLockoutRows, lockoutIdentifiersOfRecord, readLockoutState } from "./lockout.ts";
+import { deleteUserLockoutRows, readUserLockoutState } from "./lockout.ts";
 import { toRecord } from "./record.ts";
 import { getPasswordChangeRequirement, getPasswordExpiresAt } from "./requirement.ts";
 import { toEffectivePasswordPolicy } from "./tenant-policy.ts";
@@ -43,7 +43,7 @@ export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyRe
       if (!user) {
         throw APIError.from("NOT_FOUND", BASE_ERROR_CODES.USER_NOT_FOUND);
       }
-      await deleteLockoutRows(ctx.context.adapter, lockoutIdentifiersOfRecord(user));
+      await deleteUserLockoutRows(ctx.context.adapter, ctx.context.secret, user);
       return ctx.json({ status: true });
     },
   ),
@@ -67,7 +67,7 @@ export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyRe
       const lockoutState =
         effective.lockout === null
           ? { lockedUntil: null, failedAttempts: 0 }
-          : await readLockoutState(ctx.context.adapter, lockoutIdentifiersOfRecord(user), new Date());
+          : await readUserLockoutState(ctx.context.adapter, ctx.context.secret, user, new Date());
       return ctx.json({
         mustChangePassword,
         passwordChangedAt,

@@ -2,14 +2,23 @@ import { tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import type { DBAdapter } from "better-auth/types";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
-import type { ResolvedLockout } from "./options.ts";
+import { issueDeviceCookie, passwordEpochOf, readDeviceCookie } from "./device-cookie.ts";
+import type { SignInHookContext } from "./device-cookie.ts";
+import {
+  LOCKOUT_MODEL,
+  deviceCookieBinding,
+  lockoutDeviceKey,
+  lockoutDeviceKeyPrefix,
+  lockoutIdentifierKey,
+} from "./lockout-keys.ts";
+import { createLockoutRetentionPurge } from "./lockout-retention.ts";
+import { summarizeError } from "./log-error.ts";
+import type { ResolvedLockout, ResolvedLockoutPlatformSettings } from "./options.ts";
 import { readNonEmptyString, toRecord } from "./record.ts";
 import { tenantPolicyUnavailable } from "./tenant-resolver.ts";
 import type { EffectivePolicyResolver, PolicySubject } from "./tenant-resolver.ts";
 
 export const SIGN_IN_PATHS: readonly string[] = ["/sign-in/email", "/sign-in/username", "/sign-in/phone-number"];
-
-const LOCKOUT_MODEL = "signInLockout";
 
 export type UsernameNormalizer = (username: string) => string;
 
@@ -130,28 +139,29 @@ export const lockoutIdentifiersOfRecord = (user: unknown): string[] => {
   });
 };
 
-export const deleteLockoutRows = async (adapter: DBAdapter, identifiers: string[]): Promise<void> => {
-  if (identifiers.length === 0) {
-    return;
+type LockoutWhere = { field: string; operator: "in" | "starts_with"; value: string | string[] };
+
+const userLockoutWheres = async (secret: string, user: unknown): Promise<LockoutWhere[][]> => {
+  const wheres: LockoutWhere[][] = [];
+  const identifiers = lockoutIdentifiersOfRecord(user);
+  if (identifiers.length > 0) {
+    const keys = await Promise.all(identifiers.map((identifier) => lockoutIdentifierKey(secret, identifier)));
+    wheres.push([{ field: "identifier", operator: "in", value: keys }]);
   }
-  await adapter.deleteMany({
-    model: LOCKOUT_MODEL,
-    where: [{ field: "identifier", operator: "in", value: identifiers }],
-  });
+  const userId = readNonEmptyString(toRecord(user), "id");
+  if (userId !== null) {
+    wheres.push([{ field: "identifier", operator: "starts_with", value: await lockoutDeviceKeyPrefix(secret, userId) }]);
+  }
+  return wheres;
 };
 
-export const readLockoutState = async (
-  adapter: DBAdapter,
-  identifiers: string[],
-  now: Date,
-): Promise<LockoutState> => {
-  if (identifiers.length === 0) {
-    return { lockedUntil: null, failedAttempts: 0 };
+export const deleteUserLockoutRows = async (adapter: DBAdapter, secret: string, user: unknown): Promise<void> => {
+  for (const where of await userLockoutWheres(secret, user)) {
+    await adapter.deleteMany({ model: LOCKOUT_MODEL, where });
   }
-  const rows = await adapter.findMany<LockoutRow>({
-    model: LOCKOUT_MODEL,
-    where: [{ field: "identifier", operator: "in", value: identifiers }],
-  });
+};
+
+const summarizeLockoutRows = (rows: LockoutRow[], now: Date): LockoutState => {
   let lockedUntil: Date | null = null;
   let failedAttempts = 0;
   for (const row of rows) {
@@ -168,17 +178,36 @@ export const readLockoutState = async (
   return { lockedUntil, failedAttempts };
 };
 
+export const readUserLockoutState = async (
+  adapter: DBAdapter,
+  secret: string,
+  user: unknown,
+  now: Date,
+): Promise<LockoutState> => {
+  const rows: LockoutRow[] = [];
+  for (const where of await userLockoutWheres(secret, user)) {
+    rows.push(...(await adapter.findMany<LockoutRow>({ model: LOCKOUT_MODEL, where })));
+  }
+  return summarizeLockoutRows(rows, now);
+};
+
 const identifierWhere = (identifier: string) => ({ field: "identifier", value: identifier });
 
 const lockUntil = (now: Date, lockout: ResolvedLockout): Date => new Date(now.getTime() + lockout.durationSeconds * 1000);
 
-type LockoutHookContext = Parameters<Parameters<typeof createAuthMiddleware>[0]>[0];
-
 type PasswordVerifier = (input: { hash: string; password: string }) => Promise<boolean>;
 
-export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePolicy: EffectivePolicyResolver) => {
+export const createSignInLockoutHooks = (
+  lockout: ResolvedLockout,
+  platform: ResolvedLockoutPlatformSettings,
+  effectivePolicy: EffectivePolicyResolver,
+) => {
   const requestsWithCorrectPassword = new WeakSet<object>();
   const effectiveLockoutByRequest = new WeakMap<object, Promise<ResolvedLockout>>();
+  const signInUserByRequest = new WeakMap<object, Promise<Record<string, unknown> | null>>();
+  const counterKeyByRequest = new WeakMap<object, string>();
+  const purgeStaleRows =
+    platform.retentionSeconds === null ? null : createLockoutRetentionPurge(platform.retentionSeconds);
 
   const trackVerifiedPassword =
     (originalVerify: PasswordVerifier): PasswordVerifier =>
@@ -202,27 +231,46 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
     return signInLockoutIdentifier(path, body, isUsernameNormalizer(normalization) ? normalization : undefined);
   };
 
-  const lookupEffectiveLockout = async (ctx: LockoutHookContext): Promise<ResolvedLockout> => {
-    const lookup = signInUserLookup(
+  const userLookupOf = (ctx: SignInHookContext): SignInUserLookup | null =>
+    signInUserLookup(
       ctx.path,
       ctx.body,
       toRecord(ctx.context.getPlugin("username")?.options).usernameNormalization,
     );
+
+  const findSignInUser = (ctx: SignInHookContext): Promise<Record<string, unknown> | null> => {
+    const cached = signInUserByRequest.get(ctx.context);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const lookup = userLookupOf(ctx);
+    const pending =
+      lookup === null
+        ? Promise.resolve(null)
+        : ctx.context.adapter
+            .findOne<Record<string, unknown>>({
+              model: "user",
+              where: [{ field: lookup.field, value: lookup.value }],
+            })
+            .then((found) => (found !== null && typeof found.id === "string" ? toRecord(found) : null));
+    signInUserByRequest.set(ctx.context, pending);
+    return pending;
+  };
+
+  const lookupEffectiveLockout = async (ctx: SignInHookContext): Promise<ResolvedLockout> => {
+    const lookup = userLookupOf(ctx);
     let subject: PolicySubject = { kind: "anonymous", email: null };
     if (lookup !== null) {
       let found: Record<string, unknown> | null;
       try {
-        found = await ctx.context.adapter.findOne<Record<string, unknown>>({
-          model: "user",
-          where: [{ field: lookup.field, value: lookup.value }],
-        });
+        found = await findSignInUser(ctx);
       } catch (error) {
-        ctx.context.logger.error("password-policy: failed to look up the user for tenantPolicy", error);
+        ctx.context.logger.error("password-policy: failed to look up the user for tenantPolicy", summarizeError(error));
         throw tenantPolicyUnavailable();
       }
       subject =
-        found !== null && typeof found.id === "string"
-          ? { kind: "user", record: toRecord(found) }
+        found !== null
+          ? { kind: "user", record: found }
           : { kind: "anonymous", email: lookup.field === "email" ? lookup.value : null };
     }
     const resolved = await effectivePolicy.resolve({ authContext: ctx.context, endpoint: ctx }, subject);
@@ -232,7 +280,7 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
     return resolved.lockout;
   };
 
-  const effectiveLockout = (ctx: LockoutHookContext): Promise<ResolvedLockout> => {
+  const effectiveLockout = (ctx: SignInHookContext): Promise<ResolvedLockout> => {
     if (!effectivePolicy.tenantAware) {
       return Promise.resolve(lockout);
     }
@@ -245,23 +293,68 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
     return pending;
   };
 
+  const classifyAttempt = async (ctx: SignInHookContext, identifier: string): Promise<string> => {
+    const secret = ctx.context.secret;
+    if (platform.deviceCookieMaxAgeSeconds !== null) {
+      const cookie = await readDeviceCookie(ctx);
+      if (cookie !== null) {
+        let user: Record<string, unknown> | null = null;
+        try {
+          user = await findSignInUser(ctx);
+        } catch (error) {
+          ctx.context.logger.error("password-policy: failed to look up the user for the device cookie", summarizeError(error));
+        }
+        const userId = user === null ? null : readNonEmptyString(user, "id");
+        if (user !== null && userId !== null) {
+          const binding = await deviceCookieBinding(
+            secret,
+            userId,
+            cookie.deviceId,
+            cookie.expiresAt,
+            passwordEpochOf(user),
+          );
+          if (binding === cookie.binding) {
+            return lockoutDeviceKey(secret, userId, cookie.deviceId);
+          }
+        }
+      }
+    }
+    return lockoutIdentifierKey(secret, identifier);
+  };
+
+  const issueTrustedDevice = async (ctx: SignInHookContext, maxAgeSeconds: number): Promise<void> => {
+    try {
+      const user = await findSignInUser(ctx);
+      if (user !== null) {
+        await issueDeviceCookie(ctx, user, maxAgeSeconds);
+      }
+    } catch (error) {
+      ctx.context.logger.error("password-policy: failed to issue the sign-in device cookie", summarizeError(error));
+    }
+  };
+
   const matcher = (context: { path?: string | undefined }): boolean =>
     typeof context.path === "string" && SIGN_IN_PATHS.includes(context.path);
 
   const before = {
     matcher,
     handler: createAuthMiddleware(async (ctx) => {
+      if (purgeStaleRows !== null) {
+        await purgeStaleRows(ctx.context);
+      }
       const identifier = resolveIdentifier(ctx.path, ctx.body, ctx.context.getPlugin("username"));
       if (identifier === null) {
         return;
       }
+      const key = await classifyAttempt(ctx, identifier);
+      counterKeyByRequest.set(ctx.context, key);
       const adapter = ctx.context.adapter;
       const now = new Date();
       const lockedError = () => APIError.from("TOO_MANY_REQUESTS", PASSWORD_POLICY_ERROR_CODES.SIGN_IN_LOCKED);
 
       const existing = await adapter.findOne<LockoutRow>({
         model: LOCKOUT_MODEL,
-        where: [identifierWhere(identifier)],
+        where: [identifierWhere(key)],
       });
       if (existing?.lockedUntil) {
         const previousLockedUntil = new Date(existing.lockedUntil);
@@ -270,7 +363,7 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
         }
         await adapter.incrementOne<LockoutRow>({
           model: LOCKOUT_MODEL,
-          where: [identifierWhere(identifier), { field: "lockedUntil", value: previousLockedUntil }],
+          where: [identifierWhere(key), { field: "lockedUntil", value: previousLockedUntil }],
           increment: {},
           set: { failedAttempts: 0, lockedUntil: null },
         });
@@ -281,7 +374,7 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
       const reserve = () =>
         adapter.incrementOne<LockoutRow>({
           model: LOCKOUT_MODEL,
-          where: [identifierWhere(identifier)],
+          where: [identifierWhere(key)],
           increment: { failedAttempts: 1 },
           set: { lastAttemptAt: now },
         });
@@ -291,7 +384,7 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
         try {
           reserved = await adapter.create<Omit<LockoutRow, "id">, LockoutRow>({
             model: LOCKOUT_MODEL,
-            data: { identifier, failedAttempts: 1, lockedUntil: null, lastAttemptAt: now },
+            data: { identifier: key, failedAttempts: 1, lockedUntil: null, lastAttemptAt: now },
           });
         } catch (error) {
           reserved = await reserve();
@@ -304,7 +397,7 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
       if (reserved.failedAttempts > effective.maxAttempts) {
         await adapter.updateMany({
           model: LOCKOUT_MODEL,
-          where: [identifierWhere(identifier)],
+          where: [identifierWhere(key)],
           update: { lockedUntil: lockUntil(now, effective) },
         });
         throw lockedError();
@@ -315,14 +408,17 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
   const after = {
     matcher,
     handler: createAuthMiddleware(async (ctx) => {
-      const identifier = resolveIdentifier(ctx.path, ctx.body, ctx.context.getPlugin("username"));
-      if (identifier === null) {
+      const key = counterKeyByRequest.get(ctx.context);
+      if (key === undefined) {
         return;
       }
       const adapter = ctx.context.adapter;
 
       if (requestsWithCorrectPassword.has(ctx.context)) {
-        await adapter.deleteMany({ model: LOCKOUT_MODEL, where: [identifierWhere(identifier)] });
+        await adapter.deleteMany({ model: LOCKOUT_MODEL, where: [identifierWhere(key)] });
+        if (platform.deviceCookieMaxAgeSeconds !== null) {
+          await issueTrustedDevice(ctx, platform.deviceCookieMaxAgeSeconds);
+        }
         return;
       }
 
@@ -330,12 +426,12 @@ export const createSignInLockoutHooks = (lockout: ResolvedLockout, effectivePoli
 
       const row = await adapter.findOne<LockoutRow>({
         model: LOCKOUT_MODEL,
-        where: [identifierWhere(identifier)],
+        where: [identifierWhere(key)],
       });
       if (row !== null && row.failedAttempts >= effective.maxAttempts) {
         await adapter.updateMany({
           model: LOCKOUT_MODEL,
-          where: [identifierWhere(identifier)],
+          where: [identifierWhere(key)],
           update: { lockedUntil: lockUntil(new Date(), effective) },
         });
       }

@@ -4,7 +4,7 @@ import { createPasswordPolicyEndpoints } from "./endpoints.ts";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { createPasswordChangeGate } from "./gate.ts";
 import { createSignInLockoutHooks } from "./lockout.ts";
-import { resolvePasswordPolicyOptions, resolveTenantPolicyOption } from "./options.ts";
+import { resolveLockoutPlatformSettings, resolvePasswordPolicyOptions, resolveTenantPolicyOption } from "./options.ts";
 import type { PasswordPolicyOptions } from "./options.ts";
 import { createAdminCreateUserPolicyHook, createPolicyEnforcingHash } from "./password-hash.ts";
 import type { PasswordWriteTargets } from "./password-hash.ts";
@@ -16,8 +16,11 @@ export const passwordPolicy = (options?: PasswordPolicyOptions) => {
   const policy = resolvePasswordPolicyOptions(options);
   const effectivePolicy = createEffectivePolicyResolver(policy, resolveTenantPolicyOption(options?.tenantPolicy));
   const passwordWriteTargets: PasswordWriteTargets = new WeakMap();
+  const lockoutPlatform = resolveLockoutPlatformSettings(options?.lockout, policy.lockout);
   const lockoutHooks =
-    policy.lockout === null ? null : createSignInLockoutHooks(policy.lockout, effectivePolicy);
+    policy.lockout === null || lockoutPlatform === null
+      ? null
+      : createSignInLockoutHooks(policy.lockout, lockoutPlatform, effectivePolicy);
 
   return {
     id: "password-policy",
@@ -80,6 +83,7 @@ export type {
   PasswordHistoryOptions,
   PasswordPolicyOptions,
   PasswordValidationInput,
+  SignInDeviceCookieOptions,
   SignInLockoutOptions,
   TenantPasswordPolicyContext,
   TenantPasswordPolicyOverride,

@@ -7,6 +7,7 @@ import type {
   TenantPasswordPolicyResolver,
   TenantPasswordPolicyUser,
 } from "./options.ts";
+import { summarizeError } from "./log-error.ts";
 import { readString, toRecord } from "./record.ts";
 import { mergeTenantPasswordPolicy, validateTenantPasswordPolicyOverride } from "./tenant-policy.ts";
 
@@ -86,7 +87,7 @@ export const createEffectivePolicyResolver = (
     try {
       found = await scope.authContext.internalAdapter.findUserById(subject.userId);
     } catch (error) {
-      throw failClosed(scope, "password-policy: failed to load the user for tenantPolicy", error);
+      throw failClosed(scope, "password-policy: failed to load the user for tenantPolicy", summarizeError(error));
     }
     if (!found) {
       throw failClosed(scope, "password-policy: user for tenantPolicy was not found", subject.userId);

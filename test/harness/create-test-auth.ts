@@ -8,6 +8,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin, username, phoneNumber, emailOTP, twoFactor, testUtils, bearer } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { passwordPolicy } from "../../src/index.ts";
+import { lockoutDeviceKeyPrefix, lockoutIdentifierKey } from "../../src/lockout-keys.ts";
 import type { PasswordPolicyOptions } from "../../src/index.ts";
 import * as schema from "../fixtures/auth-schema.ts";
 
@@ -58,6 +59,7 @@ export interface TestAuthOptions {
   rewriteSignInErrors?: boolean;
   usernamePosition?: "before-policy" | "after-policy";
   userBeforeHook?: ReturnType<typeof createAuthMiddleware>;
+  backgroundTasks?: (promise: Promise<unknown>) => void;
 }
 
 export interface SignedUpUser {
@@ -144,6 +146,20 @@ export const latestCookieHeadersFrom = (responseHeaders: Headers): Headers => {
   }
   const cookie = [...latest].map(([name, value]) => `${name}=${value}`).join("; ");
   return new Headers({ cookie });
+};
+
+const DEVICE_COOKIE_SUFFIX = "password_policy_device";
+
+export const deviceSetCookieFrom = (responseHeaders: Headers): string | undefined =>
+  responseHeaders.getSetCookie().find((entry) => {
+    const name = entry.split(";")[0]?.split("=")[0] ?? "";
+    return name.endsWith(DEVICE_COOKIE_SUFFIX);
+  });
+
+export const deviceCookieHeadersFrom = (responseHeaders: Headers): Headers => {
+  const entry = deviceSetCookieFrom(responseHeaders);
+  if (entry === undefined) throw new Error("response did not set the device cookie");
+  return new Headers({ cookie: entry.split(";")[0] ?? "" });
 };
 
 export const pause = (milliseconds = 3): Promise<void> =>
@@ -294,6 +310,9 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
           },
         }
       : {}),
+    ...(options.backgroundTasks
+      ? { advanced: { backgroundTasks: { handler: options.backgroundTasks } } }
+      : {}),
     plugins,
   });
 
@@ -367,11 +386,42 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
   const lockoutRows = (): Promise<LockoutRow[]> =>
     adapter.findMany<LockoutRow>({ model: "signInLockout" });
 
-  const lockoutRow = (identifier: string): Promise<LockoutRow | null> =>
+  const lockoutRow = async (identifier: string): Promise<LockoutRow | null> =>
     adapter.findOne<LockoutRow>({
       model: "signInLockout",
-      where: [{ field: "identifier", value: identifier }],
+      where: [
+        { field: "identifier", value: await lockoutIdentifierKey(context.secret, identifier) },
+      ],
     });
+
+  const deviceLockoutRows = async (userId: string): Promise<LockoutRow[]> =>
+    adapter.findMany<LockoutRow>({
+      model: "signInLockout",
+      where: [
+        {
+          field: "identifier",
+          operator: "starts_with",
+          value: await lockoutDeviceKeyPrefix(context.secret, userId),
+        },
+      ],
+    });
+
+  const signInResponse = (
+    path: string,
+    body: Record<string, unknown>,
+    headers?: Headers,
+  ): Promise<Response> => {
+    const requestHeaders = new Headers(headers);
+    requestHeaders.set("content-type", "application/json");
+    requestHeaders.set("origin", "http://localhost:3000");
+    return auth.handler(
+      new Request(`http://localhost:3000/api/auth${path}`, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify(body),
+      }),
+    );
+  };
 
   const updateUserRow = async (userId: string, update: Record<string, unknown>) => {
     await adapter.update({
@@ -384,7 +434,9 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
   const expireLock = async (identifier: string) => {
     await adapter.update({
       model: "signInLockout",
-      where: [{ field: "identifier", value: identifier }],
+      where: [
+        { field: "identifier", value: await lockoutIdentifierKey(context.secret, identifier) },
+      ],
       update: { lockedUntil: new Date(Date.now() - 60_000) },
     });
   };
@@ -469,6 +521,8 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
     allHistoryRows,
     lockoutRows,
     lockoutRow,
+    deviceLockoutRows,
+    signInResponse,
     updateUserRow,
     expireLock,
     backdatePassword,

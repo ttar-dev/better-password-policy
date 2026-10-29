@@ -53,6 +53,7 @@ export const passwordPolicySchema = {
       lastAttemptAt: {
         type: "date",
         required: true,
+        index: true,
       },
     },
   },

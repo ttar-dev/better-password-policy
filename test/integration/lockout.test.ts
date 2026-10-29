@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   createAuthRegistry,
   captureApiError,
@@ -12,6 +12,7 @@ import {
   WRONG_PASSWORD,
 } from "../harness/create-test-auth.ts";
 import type { TestAuth } from "../harness/create-test-auth.ts";
+import { lockoutIdentifierKey } from "../../src/lockout-keys.ts";
 
 const registry = createAuthRegistry();
 const { open } = registry;
@@ -250,7 +251,7 @@ describe("unlocking", () => {
     await t.adapter.create({
       model: "signInLockout",
       data: {
-        identifier: EMAIL_IDENTIFIER,
+        identifier: await lockoutIdentifierKey(t.context.secret, EMAIL_IDENTIFIER),
         failedAttempts: 3,
         lockedUntil: new Date(Date.now() + 600_000),
         lastAttemptAt: new Date(),
@@ -258,6 +259,24 @@ describe("unlocking", () => {
     });
     await t.auth.api.unlockSignIn({ body: { userId: user.id } });
     expect(await t.lockoutRows()).toHaveLength(0);
+  });
+});
+
+describe("lockout rows written before keyed hashing", () => {
+  it("ignores a legacy plaintext row that still carries an active lock", async () => {
+    const t = await open({ policy });
+    await t.signUp();
+    await t.adapter.create({
+      model: "signInLockout",
+      data: {
+        identifier: EMAIL_IDENTIFIER,
+        failedAttempts: 3,
+        lockedUntil: new Date(Date.now() + 600_000),
+        lastAttemptAt: new Date(),
+      },
+    });
+    const result = await correctEmailSignIn(t);
+    expect(result.user.email).toBe(DEFAULT_EMAIL);
   });
 });
 
@@ -420,6 +439,32 @@ describe("lockout cleanup on user deletion", () => {
     expect(await t.lockoutRows()).toHaveLength(1);
     await t.auth.api.deleteUser({ body: { password: DEFAULT_PASSWORD }, headers: user.headers });
     expect(await t.lockoutRows()).toHaveLength(0);
+  });
+
+  it("logs the constant cleanup message and no identifier when the cleanup query fails", async () => {
+    const t = await open({ policy, enableDeleteUser: true });
+    const user = await t.signUp();
+    await wrongEmailSignIn(t);
+    const original = t.adapter.deleteMany.bind(t.adapter);
+    vi.spyOn(t.adapter, "deleteMany").mockImplementation((async (input: { model: string }) => {
+      if (input.model === "signInLockout") {
+        throw new Error(`Failed query: delete from sign_in_lockout params: ${DEFAULT_EMAIL}`);
+      }
+      return original(input as never);
+    }) as never);
+    const logged = vi.spyOn(t.context.logger, "error").mockImplementation(() => undefined);
+
+    await t.auth.api.deleteUser({ body: { password: DEFAULT_PASSWORD }, headers: user.headers });
+
+    const cleanupCalls = logged.mock.calls.filter(
+      (call) => call[0] === "password-policy: failed to clean up after user deletion",
+    );
+    expect(cleanupCalls).toHaveLength(1);
+    const serialized = logged.mock.calls
+      .flat()
+      .map((arg) => (arg instanceof Error ? `${arg.message}\n${arg.stack ?? ""}` : `${String(arg)}\n${JSON.stringify(arg)}`))
+      .join("\n");
+    expect(serialized).not.toContain(DEFAULT_EMAIL);
   });
 });
 

@@ -1,6 +1,7 @@
 import type { AuthContext } from "@better-auth/core";
 import type { PasswordWriteTargets } from "./password-hash.ts";
-import { deleteLockoutRows, lockoutIdentifiersOfRecord } from "./lockout.ts";
+import { deleteUserLockoutRows } from "./lockout.ts";
+import { summarizeError } from "./log-error.ts";
 import { ADMIN_PASSWORD_PATHS } from "./password-targets.ts";
 import { readNonEmptyString, toRecord } from "./record.ts";
 import type { EffectivePolicyResolver, PolicyEndpointContext } from "./tenant-resolver.ts";
@@ -68,10 +69,10 @@ export const recordCredentialPasswordWrite = async (
       ...(keepsForcedChange ? {} : { mustChangePassword: false }),
     });
     if (updatedUser) {
-      await deleteLockoutRows(adapter, lockoutIdentifiersOfRecord(toRecord(updatedUser)));
+      await deleteUserLockoutRows(adapter, authContext.secret, toRecord(updatedUser));
     }
   } catch (error) {
-    authContext.logger.error("password-policy: failed to record credential password write", error);
+    authContext.logger.error("password-policy: failed to record credential password write", summarizeError(error));
   }
 };
 
@@ -153,7 +154,7 @@ export const createPasswordWriteHooks = (
       delete: {
         after: async (user: Record<string, unknown>): Promise<void> => {
           try {
-            await deleteLockoutRows(authContext.adapter, lockoutIdentifiersOfRecord(user));
+            await deleteUserLockoutRows(authContext.adapter, authContext.secret, user);
             const userId = readNonEmptyString(user, "id");
             if (userId !== null) {
               await authContext.adapter.deleteMany({
@@ -162,7 +163,7 @@ export const createPasswordWriteHooks = (
               });
             }
           } catch (error) {
-            authContext.logger.error("password-policy: failed to clean up after user deletion", error);
+            authContext.logger.error("password-policy: failed to clean up after user deletion", summarizeError(error));
           }
         },
       },
