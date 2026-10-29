@@ -69,7 +69,7 @@ Table and field names can be changed with the `schema` option, for example `pass
 
 `signInLockout.lastAttemptAt` is indexed since 1.2.0, so the retention purge does not scan the table. Better Auth only checks that tables and columns exist, so a database without the index keeps working, only slower.
 
-## Upgrading to 1.3.0
+## Upgrading to 1.2.1
 
 No schema change and no migration. With the default options the plugin behaves like 1.2.0. The new `forcedChange: false` option turns forced password change off, see [Forced change and expiry](#forced-change-and-expiry).
 

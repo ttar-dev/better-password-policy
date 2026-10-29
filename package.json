@@ -1,9 +1,9 @@
 {
   "name": "@ttar-dev/better-password-policy",
-  "version": "1.3.0",
+  "version": "1.2.1",
   "description": "Password complexity, history, expiry, forced change and sign-in lockout for Better Auth",
   "keywords": ["better-auth", "password-policy", "lockout"],
-  "repository": "github:ttar-dev/better-password-policy",
+  "repository": { "type": "git", "url": "git+https://github.com/ttar-dev/better-password-policy.git" },
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
