@@ -71,8 +71,9 @@ Table and field names can be changed with the `schema` option, for example `pass
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `complexity` | `{ requireUppercase: true, requireLowercase: true, requireDigit: true, requireSymbol: false, rejectPersonalInfo: true }` | Partial objects are filled from the defaults. `false` disables the minimum length, complexity, personal info and `validate` checks on every path. Better Auth min and max length still apply. |
+| `complexity` | `{ requireUppercase: true, requireLowercase: true, requireDigit: true, requireSymbol: false, rejectPersonalInfo: true, caselessLettersSatisfyCase: false }` | Partial objects are filled from the defaults. `false` disables the minimum length, complexity, personal info and `validate` checks on every path. Better Auth min and max length still apply. |
 | `complexity.minLength` | none | Integer from 1 to 128, counted in UTF-16 code units like Better Auth's own minimum. Shorter passwords answer 400 `PASSWORD_TOO_SHORT` (Better Auth's code), also on `/admin/create-user`. Keep it at or below Better Auth's `maxPasswordLength`, otherwise no password can be set. |
+| `complexity.caselessLettersSatisfyCase` | `false` | When `true`, a password with at least one caseless letter (Unicode `Lo` outside the Latin and Common scripts, for example Thai, Hebrew, Arabic or CJK letters; `º`, `ª` and other Latin `Lo` characters do not count) satisfies both `requireUppercase` and `requireLowercase`. Passwords without a caseless letter are judged as before. One caseless letter is enough, so pair it with `minLength`. A tenant can only turn it off. |
 | `complexity.validate` | none | `({ password, user: { id, email, name } }) => boolean \| Promise<boolean>`. Return `false` to reject with `PASSWORD_REJECTED`. `user.id` is `null` while the user does not exist yet. |
 | `history` | `{ count: 5 }` | Rejects the current password and the previous `count` passwords, and keeps `count + 1` rows per user. `count: 0` rejects only the current password. `false` disables the reuse check and writes no rows. |
 | `expiration` | off | `{ maxAge }` in seconds, must be greater than 0. A password older than `maxAge` blocks authenticated routes until it is changed. Omitted: no platform limit, `passwordChangedAt` is still recorded and a tenant may set `maxAge`. `false`: passwords never expire, for every tenant. `{ maxAge }`: floor for every tenant, a tenant can only shorten it. Without `tenantPolicy`, omitted and `false` behave the same. |
@@ -84,7 +85,9 @@ Forced password change has no option: it is always available and has no effect u
 
 Invalid values throw a `TypeError` starting with `password-policy:` when the plugin is created, including a `tenantPolicy` that is not a function and a `complexity.minLength` outside 1 to 128.
 
-Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters and digits are Unicode aware, a space counts as a symbol. Personal info tokens come from the email local part and the name (lowercased, split on non letters and digits, tokens of at least 3 characters); the password is rejected if it contains any token. The email domain is not used.
+Complexity checks run in this order and the first failure wins: minimum length, uppercase, lowercase, digit, symbol, personal info, `validate`, history. Letters, combining marks and digits are Unicode aware: a nonspacing or spacing combining mark (`Mn`, `Mc`, for example a Thai vowel or tone mark, or an accent) is never a symbol, while a space and an enclosing mark (`Me`, for example the keycap in `1️⃣`) count as symbols. Personal info tokens come from the email local part and the name (lowercased, normalized to NFC with `İ` folded to `i`, the same as the password, split on characters that are not letters, nonspacing or spacing marks, or digits, tokens of at least 3 code points, marks included); the password is rejected if it contains any token. The email domain is not used. Names written in Thai and other scripts that use combining marks are matched whole.
+
+Since 1.2.0, nonspacing and spacing combining marks no longer count as symbols and no longer split personal info tokens; a password that was accepted before can now be rejected for `PASSWORD_MISSING_SYMBOL` or `PASSWORD_CONTAINS_PERSONAL_INFO`. Names and passwords are compared in NFC, so a name stored with decomposed accents (`e` followed by U+0301) or Thai marks typed in a different order match the same name in the password; a password with the unaccented name is still accepted. Stored passwords are not re-checked.
 
 Where the policy is enforced: `/sign-up/email`, `/change-password`, `/reset-password`, `/email-otp/reset-password`, `/phone-number/reset-password`, `/admin/set-user-password`, `/admin/create-user` (complexity, including `minLength`, but no history) and the server-only `auth.api.setPassword`. Sign-in never runs complexity or history checks.
 
@@ -120,10 +123,10 @@ The plugin has no HTTP routes. These endpoints exist only on `auth.api` so that 
 
 An unknown `userId` fails with 404 `USER_NOT_FOUND`. A failing `tenantPolicy` fails with 503 `PASSWORD_POLICY_UNAVAILABLE`.
 
-`policy` is the effective policy of that user (the platform policy merged with the tenant override), ready to show in a change-password form. `passwordExpiresAt`, `passwordChangeRequirement`, `lockedUntil` and `failedSignInAttempts` follow it too. `minLength` is the larger of Better Auth's `minPasswordLength` and `complexity.minLength`; a section is `null` when that feature is `false`; `expiration` is `null` when passwords do not expire; `duration` is in seconds; `customValidation` tells whether a `validate` function exists. With the default options and no tenant override:
+`policy` is the effective policy of that user (the platform policy merged with the tenant override), ready to show in a change-password form. `passwordExpiresAt`, `passwordChangeRequirement`, `lockedUntil` and `failedSignInAttempts` follow it too. `minLength` is the larger of Better Auth's `minPasswordLength` and `complexity.minLength`; a section is `null` when that feature is `false`; `expiration` is `null` when passwords do not expire; `duration` is in seconds; `complexity` also reports `caselessLettersSatisfyCase`; `customValidation` tells whether a `validate` function exists. With the default options and no tenant override:
 
 ```json
-{"minLength":8,"maxLength":128,"complexity":{"requireUppercase":true,"requireLowercase":true,"requireDigit":true,"requireSymbol":false,"rejectPersonalInfo":true,"customValidation":false},"history":{"count":5},"expiration":null,"lockout":{"maxAttempts":5,"duration":900}}
+{"minLength":8,"maxLength":128,"complexity":{"requireUppercase":true,"requireLowercase":true,"requireDigit":true,"requireSymbol":false,"rejectPersonalInfo":true,"caselessLettersSatisfyCase":false,"customValidation":false},"history":{"count":5},"expiration":null,"lockout":{"maxAttempts":5,"duration":900}}
 ```
 
 The plugin does not decide who may call them. Check authorization yourself first, for example with the admin plugin:
@@ -213,6 +216,7 @@ Return `null` or `undefined` for no override. Anything else must be an object th
 | Field | Merge with the platform value | Allowed |
 | --- | --- | --- |
 | `complexity.requireUppercase`, `requireLowercase`, `requireDigit`, `requireSymbol`, `rejectPersonalInfo` | `true` if either is `true` | boolean |
+| `complexity.caselessLettersSatisfyCase` | `true` only if the platform is `true` and the tenant is not `false` (a tenant can switch it off, never on) | boolean |
 | `complexity.minLength` | larger | integer 1 to 128 |
 | `history.count` | larger | integer 0 to 24 |
 | `expiration.maxAge` | smaller of the values that are set | integer 86400 to 315360000 seconds |

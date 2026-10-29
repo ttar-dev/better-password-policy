@@ -26,6 +26,7 @@ export interface EffectivePasswordPolicy {
     requireDigit: boolean;
     requireSymbol: boolean;
     rejectPersonalInfo: boolean;
+    caselessLettersSatisfyCase: boolean;
     customValidation: boolean;
   } | null;
   history: { count: number } | null;
@@ -44,6 +45,7 @@ const overrideSchema = z.strictObject({
       requireDigit: z.boolean().optional(),
       requireSymbol: z.boolean().optional(),
       rejectPersonalInfo: z.boolean().optional(),
+      caselessLettersSatisfyCase: z.boolean().optional(),
     })
     .optional(),
   history: z.strictObject({ count: boundedInteger(TENANT_PASSWORD_POLICY_LIMITS.history.count).optional() }).optional(),
@@ -107,6 +109,7 @@ const mergeComplexity = (
     requireDigit: base.requireDigit || override?.requireDigit === true,
     requireSymbol: base.requireSymbol || override?.requireSymbol === true,
     rejectPersonalInfo: base.rejectPersonalInfo || override?.rejectPersonalInfo === true,
+    caselessLettersSatisfyCase: base.caselessLettersSatisfyCase && override?.caselessLettersSatisfyCase !== false,
     validate: base.validate,
   };
 };
@@ -147,6 +150,7 @@ export const toEffectivePasswordPolicy = (
           requireDigit: policy.complexity.requireDigit,
           requireSymbol: policy.complexity.requireSymbol,
           rejectPersonalInfo: policy.complexity.rejectPersonalInfo,
+          caselessLettersSatisfyCase: policy.complexity.caselessLettersSatisfyCase,
           customValidation: policy.complexity.validate !== null,
         },
   history: policy.historyCount === null ? null : { count: policy.historyCount },

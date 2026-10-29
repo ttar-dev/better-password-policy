@@ -22,6 +22,7 @@ afterEach(async () => {
 const [P0, P1, P2, P3] = GOOD_PASSWORDS;
 const ORIGINAL_HASH = `fast:${DEFAULT_PASSWORD}`;
 const STRICT_HEADERS = () => new Headers({ "x-tenant": "strict" });
+const THAI_PASSWORD = "\u0e23\u0e2b\u0e31\u0e2a\u0e1c\u0e48\u0e32\u0e19\u0e44\u0e17\u0e22123";
 
 type Decider = (context: TenantPasswordPolicyContext) => unknown;
 
@@ -136,6 +137,41 @@ describe("tenant override on sign-up", () => {
     const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
     await signUpNew(t);
     expect(probe.calls).toHaveLength(1);
+  });
+});
+
+describe("tenant override of caselessLettersSatisfyCase on sign-up", () => {
+  const tenantTurnsOff = (context: TenantPasswordPolicyContext) =>
+    context.headers?.get("x-tenant") === "strict" ? { complexity: { caselessLettersSatisfyCase: false } } : null;
+
+  it("rejects a Thai-only password for a tenant that switches the platform option off", async () => {
+    const probe = createProbe(tenantTurnsOff);
+    const t = await open({
+      policy: { tenantPolicy: probe.tenantPolicy, complexity: { caselessLettersSatisfyCase: true } },
+    });
+    await expectBadRequest(
+      () => signUpNew(t, STRICT_HEADERS(), "nina@example.com", THAI_PASSWORD),
+      "PASSWORD_MISSING_UPPERCASE",
+    );
+    expect(await t.context.internalAdapter.findUserByEmail("nina@example.com")).toBeNull();
+  });
+
+  it("accepts a Thai-only password for a tenant that does not switch the option off", async () => {
+    const probe = createProbe(tenantTurnsOff);
+    const t = await open({
+      policy: { tenantPolicy: probe.tenantPolicy, complexity: { caselessLettersSatisfyCase: true } },
+    });
+    const result = await signUpNew(t, undefined, "nina@example.com", THAI_PASSWORD);
+    expect(result.user.email).toBe("nina@example.com");
+  });
+
+  it("still rejects a Thai-only password when the tenant tries to switch the option on", async () => {
+    const probe = createProbe(fixed({ complexity: { caselessLettersSatisfyCase: true } }));
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    await expectBadRequest(
+      () => signUpNew(t, undefined, "nina@example.com", THAI_PASSWORD),
+      "PASSWORD_MISSING_UPPERCASE",
+    );
   });
 });
 
@@ -408,12 +444,43 @@ describe("getPasswordPolicyStatus policy field", () => {
         requireDigit: true,
         requireSymbol: true,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: false,
         customValidation: false,
       },
       history: { count: 7 },
       expiration: { maxAge: 7776000 },
       lockout: { maxAttempts: 3, duration: 3600 },
     });
+  });
+
+  it("reports caselessLettersSatisfyCase true when the platform has it on and the tenant sends nothing", async () => {
+    const probe = createProbe(fixed(null));
+    const t = await open({
+      policy: { tenantPolicy: probe.tenantPolicy, complexity: { caselessLettersSatisfyCase: true } },
+    });
+    const user = await t.signUp();
+    const status = await t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } });
+    expect(status.policy.complexity?.caselessLettersSatisfyCase).toBe(true);
+  });
+
+  it("reports caselessLettersSatisfyCase false when the platform has it on and the tenant switches it off", async () => {
+    const probe = createProbe(fixed(null));
+    const t = await open({
+      policy: { tenantPolicy: probe.tenantPolicy, complexity: { caselessLettersSatisfyCase: true } },
+    });
+    const user = await t.signUp();
+    probe.decideWith(fixed({ complexity: { caselessLettersSatisfyCase: false } }));
+    const status = await t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } });
+    expect(status.policy.complexity?.caselessLettersSatisfyCase).toBe(false);
+  });
+
+  it("reports caselessLettersSatisfyCase false when the platform has it off and the tenant sends true", async () => {
+    const probe = createProbe(fixed(null));
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    const user = await t.signUp();
+    probe.decideWith(fixed({ complexity: { caselessLettersSatisfyCase: true } }));
+    const status = await t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } });
+    expect(status.policy.complexity?.caselessLettersSatisfyCase).toBe(false);
   });
 
   it("keeps Better Auth's minimum when the tenant minLength is lower", async () => {
@@ -438,6 +505,7 @@ describe("getPasswordPolicyStatus policy field", () => {
         requireDigit: true,
         requireSymbol: false,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: false,
         customValidation: false,
       },
       history: { count: 5 },

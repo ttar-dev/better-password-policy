@@ -21,6 +21,7 @@ describe("resolvePasswordPolicyOptions defaults", () => {
         requireDigit: true,
         requireSymbol: false,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: false,
         validate: null,
       },
       historyCount: 5,
@@ -49,8 +50,35 @@ describe("resolvePasswordPolicyOptions partial objects", () => {
       requireDigit: true,
       requireSymbol: true,
       rejectPersonalInfo: true,
+      caselessLettersSatisfyCase: false,
       validate: null,
     });
+  });
+
+  it("resolves caselessLettersSatisfyCase true and keeps the rest at the defaults", () => {
+    const resolved = resolvePasswordPolicyOptions({
+      complexity: { caselessLettersSatisfyCase: true },
+    });
+    expect(resolved.complexity).toEqual({
+      minLength: null,
+      requireUppercase: true,
+      requireLowercase: true,
+      requireDigit: true,
+      requireSymbol: false,
+      rejectPersonalInfo: true,
+      caselessLettersSatisfyCase: true,
+      validate: null,
+    });
+  });
+
+  it.each([
+    ["omitted", {}, false],
+    ["false", { caselessLettersSatisfyCase: false }, false],
+    ["true", { caselessLettersSatisfyCase: true }, true],
+  ] as const)("resolves caselessLettersSatisfyCase %s to %s", (_name, complexity, expected) => {
+    expect(resolvePasswordPolicyOptions({ complexity }).complexity?.caselessLettersSatisfyCase).toBe(
+      expected,
+    );
   });
 
   it("passes a custom validate function through unchanged", () => {

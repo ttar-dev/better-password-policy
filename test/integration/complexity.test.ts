@@ -11,6 +11,7 @@ import {
   WEAK_NO_LOWERCASE,
   WEAK_NO_DIGIT,
 } from "../harness/create-test-auth.ts";
+import type { TestAuth } from "../harness/create-test-auth.ts";
 
 const registry = createAuthRegistry();
 const { open } = registry;
@@ -20,6 +21,10 @@ afterEach(async () => {
 
 const ORIGINAL_HASH = `fast:${DEFAULT_PASSWORD}`;
 const PHONE = "+66812345678";
+const THAI_PASSWORD = "\u0e23\u0e2b\u0e31\u0e2a\u0e1c\u0e48\u0e32\u0e19\u0e44\u0e17\u0e22123";
+const THAI_PASSWORD_WITH_MARKS = "\u0e01\u0e48\u0e2d\u0e19\u0e19\u0e2d\u0e19123";
+const THAI_NAME = "\u0e13\u0e31\u0e10\u0e27\u0e38\u0e12\u0e34";
+const THAI_NAME_PASSWORD = `X${THAI_NAME}9a`;
 
 describe("complexity on every password-setting path", () => {
   it("rejects a weak password on sign-up and creates no user", async () => {
@@ -220,6 +225,79 @@ describe("personal info checks use the right user per path", () => {
       "PASSWORD_CONTAINS_PERSONAL_INFO",
     );
     expect(await t.context.internalAdapter.findUserByEmail("erin.cole@example.com")).toBeNull();
+  });
+});
+
+describe("caseless letters and combining marks", () => {
+  const signUpWith = (t: TestAuth, password: string, name = "Nina Park") =>
+    t.auth.api.signUpEmail({ body: { email: "nina@example.com", name, password } });
+
+  it("accepts a Thai-only password on sign-up when caselessLettersSatisfyCase is on", async () => {
+    const t = await open({ policy: { complexity: { caselessLettersSatisfyCase: true } } });
+    const result = await signUpWith(t, THAI_PASSWORD);
+    expect(result.user.email).toBe("nina@example.com");
+    expect((await t.getCredentialAccount(result.user.id)).password).toBe(`fast:${THAI_PASSWORD}`);
+  });
+
+  it.each([
+    ["omitted", {}],
+    ["false", { caselessLettersSatisfyCase: false }],
+  ])("rejects a Thai-only password on sign-up when caselessLettersSatisfyCase is %s", async (_name, complexity) => {
+    const t = await open({ policy: { complexity } });
+    await expectBadRequest(() => signUpWith(t, THAI_PASSWORD), "PASSWORD_MISSING_UPPERCASE");
+    expect(await t.context.internalAdapter.findUserByEmail("nina@example.com")).toBeNull();
+  });
+
+  it("accepts a Thai-only new password on change-password when caselessLettersSatisfyCase is on", async () => {
+    const t = await open({ policy: { complexity: { caselessLettersSatisfyCase: true } } });
+    const user = await t.signUp();
+    await t.auth.api.changePassword({
+      body: { currentPassword: DEFAULT_PASSWORD, newPassword: THAI_PASSWORD },
+      headers: user.headers,
+    });
+    expect((await t.getCredentialAccount(user.id)).password).toBe(`fast:${THAI_PASSWORD}`);
+  });
+
+  it("still rejects a Latin password without uppercase when caselessLettersSatisfyCase is on", async () => {
+    const t = await open({ policy: { complexity: { caselessLettersSatisfyCase: true } } });
+    await expectBadRequest(() => signUpWith(t, WEAK_NO_UPPERCASE), "PASSWORD_MISSING_UPPERCASE");
+  });
+
+  it("does not count Thai vowel and tone marks as a symbol when requireSymbol is on", async () => {
+    const t = await open({
+      policy: { complexity: { requireSymbol: true, caselessLettersSatisfyCase: true } },
+    });
+    await expectBadRequest(() => signUpWith(t, THAI_PASSWORD_WITH_MARKS), "PASSWORD_MISSING_SYMBOL");
+  });
+
+  it("accepts a Thai password once it contains a real symbol when requireSymbol is on", async () => {
+    const t = await open({
+      policy: { complexity: { requireSymbol: true, caselessLettersSatisfyCase: true } },
+    });
+    const result = await signUpWith(t, `${THAI_PASSWORD_WITH_MARKS}!`);
+    expect(result.user.email).toBe("nina@example.com");
+  });
+
+  it("rejects a password containing the whole Thai name on sign-up", async () => {
+    const t = await open();
+    await expectBadRequest(
+      () => signUpWith(t, THAI_NAME_PASSWORD, THAI_NAME),
+      "PASSWORD_CONTAINS_PERSONAL_INFO",
+    );
+    expect(await t.context.internalAdapter.findUserByEmail("nina@example.com")).toBeNull();
+  });
+
+  it("rejects a password containing the whole Thai name on change-password", async () => {
+    const t = await open();
+    const user = await t.signUp({ name: THAI_NAME });
+    await expectBadRequest(
+      () =>
+        t.auth.api.changePassword({
+          body: { currentPassword: DEFAULT_PASSWORD, newPassword: THAI_NAME_PASSWORD },
+          headers: user.headers,
+        }),
+      "PASSWORD_CONTAINS_PERSONAL_INFO",
+    );
   });
 });
 

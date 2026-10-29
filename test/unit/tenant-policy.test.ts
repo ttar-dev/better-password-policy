@@ -47,6 +47,7 @@ describe("validateTenantPasswordPolicyOverride accepts", () => {
         requireDigit: true,
         requireSymbol: true,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: true,
       },
       history: { count: 10 },
       expiration: { maxAge: 7776000 },
@@ -82,6 +83,29 @@ describe("validateTenantPasswordPolicyOverride accepts", () => {
       },
     };
     expect(validateTenantPasswordPolicyOverride(override)).toEqual({ success: true, data: override });
+  });
+});
+
+describe("validateTenantPasswordPolicyOverride caselessLettersSatisfyCase", () => {
+  it.each([true, false])("accepts caselessLettersSatisfyCase %s and returns it as data", (value) => {
+    const override = { complexity: { caselessLettersSatisfyCase: value } };
+    expect(validateTenantPasswordPolicyOverride(override)).toEqual({ success: true, data: override });
+  });
+
+  it.each([
+    ["a string", "true"],
+    ["a number", 1],
+    ["null", null],
+  ])("rejects %s with the dotted path", (_name, value) => {
+    expect(invalidPaths({ complexity: { caselessLettersSatisfyCase: value } })).toEqual([
+      "complexity.caselessLettersSatisfyCase",
+    ]);
+  });
+
+  it("still rejects a misspelled sibling key", () => {
+    expect(
+      invalidPaths({ complexity: { caselessLettersSatisfyCase: true, requireNumber: true } }),
+    ).toEqual(["complexity.requireNumber"]);
   });
 });
 
@@ -200,6 +224,45 @@ describe("mergeTenantPasswordPolicy complexity flags", () => {
   });
 });
 
+describe("mergeTenantPasswordPolicy caselessLettersSatisfyCase", () => {
+  const tenantOverride = (tenant: boolean | undefined): TenantPasswordPolicyOverride =>
+    tenant === undefined ? {} : { complexity: { caselessLettersSatisfyCase: tenant } };
+
+  it.each([
+    [false, true, false],
+    [false, undefined, false],
+    [true, undefined, true],
+    [true, true, true],
+    [true, false, false],
+  ])("platform %s with tenant %s merges to %s", (platform, tenant, expected) => {
+    const result = merged({ complexity: { caselessLettersSatisfyCase: platform } }, tenantOverride(tenant));
+    expect(result.complexity?.caselessLettersSatisfyCase).toBe(expected);
+  });
+
+  it("keeps a platform that omits the option at false even when the tenant sends true", () => {
+    expect(merged(undefined, tenantOverride(true)).complexity?.caselessLettersSatisfyCase).toBe(false);
+  });
+
+  it("keeps the platform value when the tenant sends an empty complexity object", () => {
+    const result = merged({ complexity: { caselessLettersSatisfyCase: true } }, { complexity: {} });
+    expect(result.complexity?.caselessLettersSatisfyCase).toBe(true);
+  });
+
+  it("keeps complexity null and ignores the override when the platform switched complexity off", () => {
+    expect(merged({ complexity: false }, tenantOverride(true)).complexity).toBeNull();
+    expect(merged({ complexity: false }, tenantOverride(false)).complexity).toBeNull();
+  });
+
+  it("does not let a tenant turning the option off change the OR-merged flags", () => {
+    const result = merged(
+      { complexity: { caselessLettersSatisfyCase: true, requireSymbol: false } },
+      { complexity: { caselessLettersSatisfyCase: false, requireSymbol: true } },
+    );
+    expect(result.complexity?.caselessLettersSatisfyCase).toBe(false);
+    expect(result.complexity?.requireSymbol).toBe(true);
+  });
+});
+
 describe("mergeTenantPasswordPolicy numeric rules", () => {
   it("takes the larger complexity.minLength when the tenant is stricter", () => {
     expect(merged({ complexity: { minLength: 10 } }, { complexity: { minLength: 12 } }).complexity?.minLength).toBe(12);
@@ -297,7 +360,10 @@ describe("mergeTenantPasswordPolicy carry-over and purity", () => {
   });
 
   it("does not mutate the base policy", () => {
-    const base = baseFrom({ expiration: { maxAge: 2592000 } });
+    const base = baseFrom({
+      expiration: { maxAge: 2592000 },
+      complexity: { caselessLettersSatisfyCase: true },
+    });
     const snapshot = structuredClone(base);
     const result = mergeTenantPasswordPolicy(base, {
       complexity: {
@@ -307,12 +373,15 @@ describe("mergeTenantPasswordPolicy carry-over and purity", () => {
         requireLowercase: true,
         requireDigit: true,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: false,
       },
       history: { count: 20 },
       expiration: { maxAge: 86400 },
       lockout: { maxAttempts: 1, duration: 86400 },
     });
     expect(base).toEqual(snapshot);
+    expect(base.complexity?.caselessLettersSatisfyCase).toBe(true);
+    expect(result.complexity?.caselessLettersSatisfyCase).toBe(false);
     expect(result).not.toBe(base);
     expect(result.complexity).not.toBe(base.complexity);
     expect(result.lockout).not.toBe(base.lockout);
@@ -339,12 +408,28 @@ describe("toEffectivePasswordPolicy", () => {
         requireDigit: true,
         requireSymbol: false,
         rejectPersonalInfo: true,
+        caselessLettersSatisfyCase: false,
         customValidation: false,
       },
       history: { count: 5 },
       expiration: null,
       lockout: { maxAttempts: 5, duration: 900 },
     });
+  });
+
+  it("places caselessLettersSatisfyCase after rejectPersonalInfo and before customValidation", () => {
+    const keys = Object.keys(toEffectivePasswordPolicy(baseFrom(), DEFAULT_LENGTHS).complexity ?? {});
+    expect(keys.indexOf("caselessLettersSatisfyCase")).toBe(keys.indexOf("rejectPersonalInfo") + 1);
+    expect(keys.indexOf("customValidation")).toBe(keys.indexOf("caselessLettersSatisfyCase") + 1);
+  });
+
+  it.each([
+    ["the platform value true", { caselessLettersSatisfyCase: true }, {}, true],
+    ["the tenant switching it off", { caselessLettersSatisfyCase: true }, { caselessLettersSatisfyCase: false }, false],
+    ["a tenant that cannot switch it on", {}, { caselessLettersSatisfyCase: true }, false],
+  ])("reports caselessLettersSatisfyCase from %s", (_name, platform, tenant, expected) => {
+    const policy = merged({ complexity: platform }, { complexity: tenant });
+    expect(toEffectivePasswordPolicy(policy, DEFAULT_LENGTHS).complexity?.caselessLettersSatisfyCase).toBe(expected);
   });
 
   it("uses the larger of Better Auth's minimum and the plugin minLength", () => {

@@ -16,6 +16,7 @@ export interface PasswordComplexityOptions {
   requireDigit?: boolean;
   requireSymbol?: boolean;
   rejectPersonalInfo?: boolean;
+  caselessLettersSatisfyCase?: boolean;
   validate?: PasswordValidator;
 }
 
@@ -40,6 +41,7 @@ export interface TenantPasswordPolicyOverride {
     requireDigit?: boolean;
     requireSymbol?: boolean;
     rejectPersonalInfo?: boolean;
+    caselessLettersSatisfyCase?: boolean;
   };
   history?: { count?: number };
   expiration?: { maxAge?: number };
@@ -81,6 +83,7 @@ export interface ResolvedComplexity {
   requireDigit: boolean;
   requireSymbol: boolean;
   rejectPersonalInfo: boolean;
+  caselessLettersSatisfyCase: boolean;
   validate: PasswordValidator | null;
 }
 
@@ -119,6 +122,7 @@ const resolveComplexity = (option: PasswordPolicyOptions["complexity"]): Resolve
     requireDigit: option?.requireDigit ?? true,
     requireSymbol: option?.requireSymbol ?? false,
     rejectPersonalInfo: option?.rejectPersonalInfo ?? true,
+    caselessLettersSatisfyCase: option?.caselessLettersSatisfyCase ?? false,
     validate: option?.validate ?? null,
   };
 };
