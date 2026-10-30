@@ -69,6 +69,15 @@ Table and field names can be changed with the `schema` option, for example `pass
 
 `signInLockout.lastAttemptAt` is indexed since 1.2.0, so the retention purge does not scan the table. Better Auth only checks that tables and columns exist, so a database without the index keeps working, only slower.
 
+## Upgrading to 1.2.2
+
+No schema change and no migration. Changes in behavior:
+
+- The correct password now resets the lockout counter inside `password.verify`, so a sign-in that later fails with an unexpected error that is not an `APIError` (answered as 500) no longer leaves the attempt counted, see [Sign-in lockout](#sign-in-lockout).
+- A stored password history hash that `password.verify` throws on (for example a bcrypt hash left from an earlier hasher) counts as not reused instead of failing the password change or reset with a 500, see [Limitations](#limitations).
+- A failing `tenantPolicy` callback is logged as the error's name, `code` and cause chain, without its message.
+- `passwordChangedAt` stored as a millisecond timestamp is now honored by the gate and `getPasswordPolicyStatus`, so such users can start getting `PASSWORD_EXPIRED`. An invalid date is reported as `null`.
+
 ## Upgrading to 1.2.1
 
 No schema change and no migration. With the default options the plugin behaves like 1.2.0. The new `forcedChange: false` option turns forced password change off, see [Forced change and expiry](#forced-change-and-expiry).
