@@ -4,20 +4,9 @@ import * as z from "zod";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { deleteUserLockoutRows, readUserLockoutState } from "./lockout.ts";
 import { toRecord } from "./record.ts";
-import { getPasswordChangeRequirement, getPasswordExpiresAt } from "./requirement.ts";
+import { getPasswordChangeRequirement, getPasswordExpiresAt, parsePasswordChangedAt } from "./requirement.ts";
 import { toEffectivePasswordPolicy } from "./tenant-policy.ts";
 import type { EffectivePolicyResolver } from "./tenant-resolver.ts";
-
-const toDateOrNull = (value: unknown): Date | null => {
-  if (value instanceof Date) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-  return null;
-};
 
 export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyResolver) => ({
   setPasswordChangeRequired: createAuthEndpoint.serverOnly(
@@ -67,7 +56,7 @@ export const createPasswordPolicyEndpoints = (effectivePolicy: EffectivePolicyRe
         { kind: "user", record: fields },
       );
       const mustChangePassword = effectivePolicy.base.forcedChange && fields.mustChangePassword === true;
-      const passwordChangedAt = toDateOrNull(fields.passwordChangedAt);
+      const passwordChangedAt = parsePasswordChangedAt(fields.passwordChangedAt);
       const lockoutState =
         effective.lockout === null
           ? { lockedUntil: null, failedAttempts: 0 }

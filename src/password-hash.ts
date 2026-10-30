@@ -4,6 +4,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import type { DBAdapter } from "better-auth/types";
 import { findComplexityViolation, isPasswordTooShort } from "./complexity.ts";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
+import { summarizeError } from "./log-error.ts";
 import type { ResolvedPasswordPolicy } from "./options.ts";
 import { SIGN_IN_PATHS } from "./lockout.ts";
 import type { PasswordNormalizer, PasswordVerifier } from "./password-normalization.ts";
@@ -58,10 +59,15 @@ export const isPasswordReused = async (
   password: string,
   hashes: string[],
   verify: PasswordVerifier,
+  onUnreadableHash: (error: unknown) => void,
 ): Promise<boolean> => {
   for (const hash of hashes) {
-    if (await verify({ hash, password })) {
-      return true;
+    try {
+      if (await verify({ hash, password })) {
+        return true;
+      }
+    } catch (error) {
+      onUnreadableHash(error);
     }
   }
   return false;
@@ -71,7 +77,7 @@ export const assertPasswordAllowed = async (
   candidate: PasswordCandidate,
   target: PolicyTarget,
   policy: ResolvedPasswordPolicy,
-  authContext: Pick<AuthEndpointContext["context"], "adapter" | "password">,
+  authContext: Pick<AuthEndpointContext["context"], "adapter" | "password" | "logger">,
 ): Promise<void> => {
   if (policy.complexity !== null) {
     if (isPasswordTooShort(candidate.normalized, policy.complexity.minLength)) {
@@ -106,7 +112,17 @@ export const assertPasswordAllowed = async (
       target.currentPasswordHash,
       policy.historyCount,
     );
-    if (await isPasswordReused(candidate.typed, hashes, (input) => authContext.password.verify(input))) {
+    const reused = await isPasswordReused(
+      candidate.typed,
+      hashes,
+      (input) => authContext.password.verify(input),
+      (error) =>
+        authContext.logger.error(
+          "password-policy: failed to verify a stored password hash for the reuse check",
+          summarizeError(error),
+        ),
+    );
+    if (reused) {
       throw rejectWith("PASSWORD_REUSED");
     }
   }

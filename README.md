@@ -242,11 +242,13 @@ Existing users have `passwordChangedAt = null` and are never treated as expired.
 update "user" set password_changed_at = now() where password_changed_at is null;
 ```
 
+The plugin reads `passwordChangedAt` as a `Date`, an ISO string or a millisecond timestamp, in the gate, in `getPasswordPolicyStatus` and in the device cookie binding. Any other value, or a date that is invalid, counts as `null`.
+
 Cookie cache: with `session.cookieCache` enabled, the session user inside the cookie can be stale. A flag or expiry that is set after sign-in takes effect only after the cookie cache expires (`cookieCache.maxAge`), because a cached "no change required" is trusted. A cached "change required" is re-checked against the database, so changing the password unblocks the user immediately.
 
 ## Sign-in lockout
 
-Failed attempts are counted on `/sign-in/email`, `/sign-in/username` and `/sign-in/phone-number`, per identifier (`email:<lowercase email>`, `username:<normalized username>`, `phone:<phone number>`) or, for a trusted device, per device. Every sign-in attempt that does not present the correct password counts, including malformed input, unknown accounts and any error response. After `maxAttempts` such attempts the counter is locked for `duration` seconds and further sign-ins on it answer 429 `SIGN_IN_LOCKED` without checking the password. Presenting the correct password always resets the counter that was used, whatever the response is afterwards (success, two-factor, unverified email, banned user, or a response rewritten by another hook); the plugin decides this from the password verification itself, not from the response. Resetting the password and `auth.api.unlockSignIn` also delete the user's rows. Counting is atomic: an attempt is reserved before the password is verified, so concurrent requests cannot verify more than `maxAttempts` passwords per lock window.
+Failed attempts are counted on `/sign-in/email`, `/sign-in/username` and `/sign-in/phone-number`, per identifier (`email:<lowercase email>`, `username:<normalized username>`, `phone:<phone number>`) or, for a trusted device, per device. Every sign-in attempt that does not present the correct password counts, including malformed input, unknown accounts and any error response. After `maxAttempts` such attempts the counter is locked for `duration` seconds and further sign-ins on it answer 429 `SIGN_IN_LOCKED` without checking the password. Presenting the correct password always resets the counter that was used, whatever the response is afterwards (success, two-factor, unverified email, banned user, a response rewritten by another hook, or an unexpected error that is not an `APIError` and answers 500). The reset happens inside `password.verify` as soon as the password verifies, not from the response, so it also holds when the sign-in later fails with such an unexpected error, for example `sendVerificationEmail` with `sendOnSignIn` failing or a database error while the session is created. If the reset itself fails, the plugin logs it and the sign-in continues, with that attempt still counted. Resetting the password and `auth.api.unlockSignIn` also delete the user's rows. Counting is atomic: an attempt is reserved before the password is verified, so concurrent requests cannot verify more than `maxAttempts` passwords per lock window.
 
 ### Stored identifiers
 
@@ -256,7 +258,7 @@ The `identifier` column never holds an email, username or phone number. It holds
 
 A locked identifier would otherwise lock the real owner out whenever someone else guesses their email. After a verified password the response sets the cookie `better-auth.password_policy_device` (the name follows `advanced.cookiePrefix`, `__Secure-` on HTTPS and `advanced.cookies.password_policy_device`). It is signed with the Better Auth secret and uses the default cookie attributes (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` from `lockout.deviceCookie.maxAge`). The value carries a random device id, an expiry and a binding to the user and to the user's `passwordChangedAt`.
 
-- The cookie is issued whenever the correct password was verified, also on a two-factor redirect and on a 403 for a banned user or an unverified email, and never on a failure, a 429 or a 503. Every verified sign-in rotates it.
+- The cookie is issued whenever the correct password was verified, also on a two-factor redirect and on a 403 for a banned user or an unverified email, and never on a failure, a 429, a 503 or an unexpected error that is not an `APIError` (answered as 500). Every verified sign-in rotates it.
 - A sign-in that presents a valid cookie of the same user is counted in a counter of its own, not in the identifier counter. One cookie covers the email, username and phone sign-ins of the user.
 - An owner whose identifier is locked by an attacker can still sign in from the trusted device. A trusted success resets only the device counter, never the identifier counter, otherwise an attacker would get a new guess quota every time the owner signs in.
 - A new device without the cookie during an attack is still locked, like before.
@@ -284,7 +286,7 @@ where (locked_until is null or locked_until < now())
 - If `tenantPolicy` fails, the sign-in answers 503 `PASSWORD_POLICY_UNAVAILABLE` before anything is reserved or verified, so the counter does not move.
 - A user who can sign in with email, username and phone gets up to `3 * maxAttempts` attempts per lock window from untrusted clients, because the three identifiers are counted separately, plus `maxAttempts` for every trusted device. Locking one identifier does not lock the others.
 - Anyone can lock any identifier by failing sign-ins for it. This is inherent to account lockout, but the owner on a trusted device keeps access. Combine with IP rate limiting.
-- The correct password with an error that is not about the password (banned user, unverified email, two-factor required) resets the counter and is never counted. Requests that never reach password verification (validation errors, unknown account, account without a password, an unverified phone number when the phoneNumber plugin has `requireVerification`) are counted.
+- The correct password with an error that is not about the password (banned user, unverified email, two-factor required, or an unexpected error that is not an `APIError` after the password check) resets the counter and is never counted. Requests that never reach password verification (validation errors, unknown account, account without a password, an unverified phone number when the phoneNumber plugin has `requireVerification`) are counted.
 - The username counter uses the value the username plugin looks the user up with (`usernameNormalization`, applied twice with `validationOrder.username: "pre-normalization"`, like the plugin does), lowercased. With `usernameNormalization: false` or a normalizer that keeps case, usernames that differ only in case share one counter, so failed attempts on one count against the other; this keeps a case-insensitive database from giving every case variant its own counter.
 - Rotating the Better Auth secret (or its first entry in `secrets`) changes every stored identifier: counters restart, current locks are released and every device cookie becomes invalid.
 
@@ -339,7 +341,7 @@ The callback receives a `context` with:
 
 When it is called: only when the answer can matter, and at most once per user per request (the result is cached for the request). It is not called when no `tenantPolicy` is set, when every feature is `false`, for the hash check when complexity is `false` and history does not apply, for the expiry gate when the user is already forced or expired under the platform policy, has no `passwordChangedAt` or passwords never expire, for lockout while the counter being used is locked, and for history pruning when the user has no more rows than the platform keeps. The expiry gate runs on nearly every authenticated request, so cache the tenant lookup. The plugin applies no timeout to the callback.
 
-Failure is closed: if the callback throws, rejects or returns an invalid override, the plugin logs the error and answers 503 `PASSWORD_POLICY_UNAVAILABLE`; it never falls back to the platform policy.
+Failure is closed: if the callback throws, rejects or returns an invalid override, the plugin answers 503 `PASSWORD_POLICY_UNAVAILABLE`; it never falls back to the platform policy. A throw or rejection is logged with only the error's name, `code` and cause chain, never its message, which can carry query parameters such as an email. An invalid override is logged with its validation issues.
 
 | Where | On failure |
 | --- | --- |
@@ -373,7 +375,7 @@ Notes:
 
 ## Plugin order
 
-Put any plugin whose before-hook can reject or short-circuit a sign-in (for example `captcha`) before `passwordPolicy` in the `plugins` array. The lockout reserves an attempt in its before-hook and clears it in its after-hook only when the correct password was verified, so a request rejected by a before-hook that runs after `passwordPolicy` also counts as a failed attempt.
+Put any plugin whose before-hook can reject or short-circuit a sign-in (for example `captcha`) before `passwordPolicy` in the `plugins` array. The lockout reserves an attempt in its before-hook and clears it only when the endpoint verifies the correct password, so a request rejected by a before-hook that runs after `passwordPolicy` also counts as a failed attempt.
 
 A plugin that replaces `password.hash` or `password.verify` instead of wrapping them must be listed before `passwordPolicy`. Listed after, it replaces the policy's hash and every policy check is skipped.
 
@@ -385,6 +387,7 @@ The after-hook of the lockout sets the device cookie, so keep `nextCookies()` la
 
 - Password writes made by calling `internalAdapter.updatePassword` or `internalAdapter.updateAccount` directly, outside an endpoint, are not recorded in the history and do not update `passwordChangedAt`. Account creation is always recorded.
 - Password-setting endpoints added by third-party plugins are not covered by the policy.
+- A stored hash that `password.verify` throws on, for example a bcrypt hash left from an earlier hasher (the default verifier throws `Invalid password hash`), counts as not reused and is logged without the hash. A verifier that throws transiently lets that one reuse through.
 - If recording fails after the password was already changed, the error is logged and the request still succeeds; that password can then be reused later.
 - `/admin/create-user` is checked before the admin plugin authorizes the request, so an unauthenticated caller can learn the complexity rules (they are not secret), including the rules of the tenant your `tenantPolicy` picks from the email in the body, and can make your callback run. `complexity.minLength` is enforced there; Better Auth's `minPasswordLength` is not.
 - With `/email-otp/reset-password`, Better Auth consumes the OTP up front only when it does not match. A valid OTP stays usable after the policy rejects the new password, so the user can retry with a stronger one.

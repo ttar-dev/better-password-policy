@@ -1,7 +1,7 @@
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { PASSWORD_POLICY_ERROR_CODES } from "./error-codes.ts";
 import { toRecord } from "./record.ts";
-import { getPasswordChangeRequirement, type PasswordChangeRequirement } from "./requirement.ts";
+import { getPasswordChangeRequirement, parsePasswordChangedAt, type PasswordChangeRequirement } from "./requirement.ts";
 import type { EffectivePolicyResolver } from "./tenant-resolver.ts";
 
 export const PASSWORD_CHANGE_EXEMPT_PATHS: readonly string[] = [
@@ -36,12 +36,11 @@ export const PASSWORD_CHANGE_EXEMPT_PATHS: readonly string[] = [
 const toRequirementInput = (
   user: unknown,
   forcedChange: boolean,
-): { mustChangePassword: boolean; passwordChangedAt: Date | string | null } => {
+): { mustChangePassword: boolean; passwordChangedAt: Date | null } => {
   const fields = toRecord(user);
-  const changedAt = fields.passwordChangedAt;
   return {
     mustChangePassword: forcedChange && fields.mustChangePassword === true,
-    passwordChangedAt: changedAt instanceof Date || typeof changedAt === "string" ? changedAt : null,
+    passwordChangedAt: parsePasswordChangedAt(fields.passwordChangedAt),
   };
 };
 

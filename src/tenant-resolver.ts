@@ -114,7 +114,7 @@ export const createEffectivePolicyResolver = (
     try {
       override = await tenantPolicy(context);
     } catch (error) {
-      throw failClosed(scope, "password-policy: tenantPolicy failed", error);
+      throw failClosed(scope, "password-policy: tenantPolicy failed", summarizeError(error));
     }
     if (override === null || override === undefined) {
       return base;

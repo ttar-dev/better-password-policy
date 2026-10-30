@@ -601,6 +601,29 @@ export const createTestAuth = async (options: TestAuthOptions = {}) => {
 
 export type TestAuth = Awaited<ReturnType<typeof createTestAuth>>;
 
+export const collectLoggedStrings = (value: unknown, depth = 0): string[] => {
+  if (value === null || value === undefined || depth > 5) {
+    return [];
+  }
+  if (typeof value !== "object") {
+    return [String(value)];
+  }
+  const collected = [String(value)];
+  try {
+    collected.push(JSON.stringify(value));
+  } catch {
+    collected.push("");
+  }
+  if (value instanceof Error) {
+    collected.push(value.name, value.message, value.stack ?? "");
+    collected.push(...collectLoggedStrings(value.cause, depth + 1));
+  }
+  for (const nested of Object.values(value)) {
+    collected.push(...collectLoggedStrings(nested, depth + 1));
+  }
+  return collected;
+};
+
 export const createAuthRegistry = () => {
   const opened: TestAuth[] = [];
   return {

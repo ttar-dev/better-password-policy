@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { getPasswordChangeRequirement, getPasswordExpiresAt } from "../../src/requirement.ts";
+import {
+  getPasswordChangeRequirement,
+  getPasswordExpiresAt,
+  parsePasswordChangedAt,
+} from "../../src/requirement.ts";
 
 const now = new Date("2026-01-01T12:00:00.000Z");
 const secondsBefore = (seconds: number) => new Date(now.getTime() - seconds * 1000);
@@ -112,5 +116,42 @@ describe("getPasswordExpiresAt", () => {
   it("returns null when maxAge is null or undefined", () => {
     expect(getPasswordExpiresAt(now, null)).toBeNull();
     expect(getPasswordExpiresAt(now, undefined)).toBeNull();
+  });
+});
+
+describe("parsePasswordChangedAt", () => {
+  it("returns the same instance for a valid Date", () => {
+    expect(parsePasswordChangedAt(now)).toBe(now);
+  });
+
+  it("returns null for an invalid Date", () => {
+    expect(parsePasswordChangedAt(new Date(Number.NaN))).toBeNull();
+  });
+
+  it("parses an ISO string", () => {
+    expect(parsePasswordChangedAt(now.toISOString())).toEqual(now);
+  });
+
+  it("returns null for an unparsable string and for the empty string", () => {
+    expect(parsePasswordChangedAt("not a date")).toBeNull();
+    expect(parsePasswordChangedAt("")).toBeNull();
+  });
+
+  it("reads a number as milliseconds since the epoch", () => {
+    expect(parsePasswordChangedAt(now.getTime())).toEqual(now);
+  });
+
+  it("returns null for NaN and Infinity", () => {
+    expect(parsePasswordChangedAt(Number.NaN)).toBeNull();
+    expect(parsePasswordChangedAt(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(parsePasswordChangedAt(Number.NEGATIVE_INFINITY)).toBeNull();
+  });
+
+  it("returns null for null, undefined, booleans and objects", () => {
+    expect(parsePasswordChangedAt(null)).toBeNull();
+    expect(parsePasswordChangedAt(undefined)).toBeNull();
+    expect(parsePasswordChangedAt(true)).toBeNull();
+    expect(parsePasswordChangedAt(false)).toBeNull();
+    expect(parsePasswordChangedAt({})).toBeNull();
   });
 });

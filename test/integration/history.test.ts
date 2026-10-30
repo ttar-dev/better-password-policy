@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  collectLoggedStrings,
   createAuthRegistry,
   expectBadRequest,
   expectUnauthorized,
@@ -19,6 +20,8 @@ afterEach(async () => {
 
 const PHONE = "+66812345678";
 const [P0, P1, P2, P3] = GOOD_PASSWORDS;
+const UNREADABLE_HASH = "$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
+const REUSE_CHECK_LOG = "password-policy: failed to verify a stored password hash for the reuse check";
 
 const change = async (t: TestAuth, headers: Headers, currentPassword: string, newPassword: string) => {
   await pause();
@@ -143,6 +146,46 @@ describe("password history with the real scrypt hasher", () => {
     const user = await t.signUp({ password: P0 });
     await change(t, user.headers, P0, P1);
     await expectBadRequest(() => change(t, user.headers, P1, P0), "PASSWORD_REUSED");
+  });
+
+  it("accepts a change when a stored history hash cannot be read and still rejects a readable earlier password", async () => {
+    const t = await open({ realHasher: true, policy: { history: { count: 2 } } });
+    const user = await t.signUp({ password: P0 });
+    await pause();
+    await t.adapter.create({
+      model: "passwordHistory",
+      data: { userId: user.id, passwordHash: UNREADABLE_HASH, createdAt: new Date() },
+    });
+    const logged = vi.spyOn(t.context.logger, "error").mockImplementation(() => undefined);
+
+    await change(t, user.headers, P0, P1);
+
+    const signedIn = await t.auth.api.signInEmail({ body: { email: user.email, password: P1 } });
+    expect(signedIn.user.email).toBe(user.email);
+    await expectBadRequest(() => change(t, user.headers, P1, P0), "PASSWORD_REUSED");
+    const reuseCheckCalls = logged.mock.calls.filter((call) => call[0] === REUSE_CHECK_LOG);
+    expect(reuseCheckCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of reuseCheckCalls) {
+      expect(call[1]).toEqual({ name: "Error", code: null });
+    }
+    const serialized = logged.mock.calls.flatMap((call) => call.flatMap((arg) => collectLoggedStrings(arg))).join("\n");
+    expect(serialized).not.toContain(UNREADABLE_HASH);
+  });
+
+  it("accepts a reset when a stored history hash cannot be read", async () => {
+    const t = await open({ realHasher: true, policy: { history: { count: 2 } } });
+    const user = await t.signUp({ password: P0 });
+    await pause();
+    await t.adapter.create({
+      model: "passwordHistory",
+      data: { userId: user.id, passwordHash: UNREADABLE_HASH, createdAt: new Date() },
+    });
+    const token = await t.requestResetToken(user.email);
+
+    await t.auth.api.resetPassword({ body: { newPassword: P1, token } });
+
+    const signedIn = await t.auth.api.signInEmail({ body: { email: user.email, password: P1 } });
+    expect(signedIn.user.email).toBe(user.email);
   });
 });
 

@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  collectLoggedStrings,
   createAuthRegistry,
   expectBadRequest,
   expectServiceUnavailable,
@@ -548,5 +549,35 @@ describe("getPasswordPolicyStatus policy field", () => {
       () => t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } }),
       "PASSWORD_POLICY_UNAVAILABLE",
     );
+  });
+});
+
+describe("tenant policy failure logging", () => {
+  it("logs the constant message and an error summary, never the query message or the email", async () => {
+    const probe = createProbe(fixed(null));
+    const t = await open({ policy: { tenantPolicy: probe.tenantPolicy } });
+    const user = await t.signUp();
+    probe.decideWith(() => {
+      throw new Error(`Failed query: select * from "tenant" where "email" = $1\nparams: ${DEFAULT_EMAIL}`, {
+        cause: Object.assign(new Error(`duplicate key (email)=(${DEFAULT_EMAIL})`), { code: "23505" }),
+      });
+    });
+    const logged = vi.spyOn(t.context.logger, "error").mockImplementation(() => undefined);
+
+    await expectServiceUnavailable(
+      () => t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } }),
+      "PASSWORD_POLICY_UNAVAILABLE",
+    );
+
+    const failureCalls = logged.mock.calls.filter((call) => call[0] === "password-policy: tenantPolicy failed");
+    expect(failureCalls).toHaveLength(1);
+    expect(failureCalls[0]?.[1]).toEqual({
+      name: "Error",
+      code: null,
+      cause: { name: "Error", code: "23505" },
+    });
+    const serialized = logged.mock.calls.flatMap((call) => call.flatMap((arg) => collectLoggedStrings(arg))).join("\n");
+    expect(serialized).not.toContain(DEFAULT_EMAIL);
+    expect(serialized).not.toContain("Failed query");
   });
 });

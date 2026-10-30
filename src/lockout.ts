@@ -1,3 +1,4 @@
+import type { AuthContext } from "@better-auth/core";
 import { tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import type { DBAdapter } from "better-auth/types";
@@ -14,6 +15,7 @@ import {
 import { createLockoutRetentionPurge } from "./lockout-retention.ts";
 import { summarizeError } from "./log-error.ts";
 import type { ResolvedLockout, ResolvedLockoutPlatformSettings } from "./options.ts";
+import type { PasswordVerifier } from "./password-normalization.ts";
 import { readNonEmptyString, toRecord } from "./record.ts";
 import { tenantPolicyUnavailable } from "./tenant-resolver.ts";
 import type { EffectivePolicyResolver, PolicySubject } from "./tenant-resolver.ts";
@@ -187,7 +189,16 @@ const identifierWhere = (identifier: string) => ({ field: "identifier", value: i
 
 const lockUntil = (now: Date, lockout: ResolvedLockout): Date => new Date(now.getTime() + lockout.durationSeconds * 1000);
 
-type PasswordVerifier = (input: { hash: string; password: string }) => Promise<boolean>;
+const resetVerifiedCounter = async (
+  authContext: Pick<AuthContext, "adapter" | "logger">,
+  key: string,
+): Promise<void> => {
+  try {
+    await authContext.adapter.deleteMany({ model: LOCKOUT_MODEL, where: [identifierWhere(key)] });
+  } catch (error) {
+    authContext.logger.error("password-policy: failed to reset the sign-in lockout counter", summarizeError(error));
+  }
+};
 
 export const createSignInLockoutHooks = (
   lockout: ResolvedLockout,
@@ -205,13 +216,24 @@ export const createSignInLockoutHooks = (
     (originalVerify: PasswordVerifier): PasswordVerifier =>
     async (input) => {
       const verified = await originalVerify(input);
-      if (verified) {
-        const endpointContext = tryGetCurrentAuthEndpointContext();
-        if (endpointContext !== undefined && endpointContext.path !== undefined && SIGN_IN_PATHS.includes(endpointContext.path)) {
-          requestsWithCorrectPassword.add(endpointContext.context);
-        }
+      if (!verified) {
+        return false;
       }
-      return verified;
+      const endpointContext = tryGetCurrentAuthEndpointContext();
+      if (
+        endpointContext === undefined ||
+        endpointContext.path === undefined ||
+        !SIGN_IN_PATHS.includes(endpointContext.path)
+      ) {
+        return true;
+      }
+      const requestContext = endpointContext.context;
+      requestsWithCorrectPassword.add(requestContext);
+      const key = counterKeyByRequest.get(requestContext);
+      if (key !== undefined) {
+        await resetVerifiedCounter(requestContext, key);
+      }
+      return true;
     };
 
   const usernameOptionsOf = (ctx: SignInHookContext): unknown => ctx.context.getPlugin("username")?.options;
@@ -393,16 +415,15 @@ export const createSignInLockoutHooks = (
       if (key === undefined) {
         return;
       }
-      const adapter = ctx.context.adapter;
 
       if (requestsWithCorrectPassword.has(ctx.context)) {
-        await adapter.deleteMany({ model: LOCKOUT_MODEL, where: [identifierWhere(key)] });
         if (platform.deviceCookieMaxAgeSeconds !== null) {
           await issueTrustedDevice(ctx, platform.deviceCookieMaxAgeSeconds);
         }
         return;
       }
 
+      const adapter = ctx.context.adapter;
       const effective = await effectiveLockout(ctx);
 
       const row = await adapter.findOne<LockoutRow>({

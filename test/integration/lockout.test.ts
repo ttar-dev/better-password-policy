@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   createAuthRegistry,
   captureApiError,
+  collectLoggedStrings,
   expectForbidden,
   expectNotFound,
   expectTooManyRequests,
@@ -479,5 +480,73 @@ describe("lockout leaves requests it cannot identify to core", () => {
       expect(error.statusCode).not.toBe(429);
     }
     expect(await t.lockoutRows()).toHaveLength(0);
+  });
+});
+
+describe("lockout reset when the sign-in throws after the password verified", () => {
+  const SESSION_FAILURE = "session store unavailable";
+
+  it("clears the counter when the session cannot be created after the correct password", async () => {
+    const t = await open({ policy });
+    await t.signUp();
+    await wrongEmailSignIn(t);
+    await wrongEmailSignIn(t);
+    vi.spyOn(t.context.internalAdapter, "createSession").mockRejectedValueOnce(new Error(SESSION_FAILURE));
+
+    await expect(correctEmailSignIn(t)).rejects.toThrow(SESSION_FAILURE);
+
+    expect(await t.lockoutRow(EMAIL_IDENTIFIER)).toBeNull();
+    const retried = await correctEmailSignIn(t);
+    expect(retried.user.email).toBe(DEFAULT_EMAIL);
+  });
+
+  it("never locks a user whose correct sign-ins keep throwing", async () => {
+    const t = await open({ policy });
+    await t.signUp();
+    await wrongEmailSignIn(t);
+    await wrongEmailSignIn(t);
+    const createSession = vi
+      .spyOn(t.context.internalAdapter, "createSession")
+      .mockRejectedValue(new Error(SESSION_FAILURE));
+
+    for (let round = 0; round < 5; round += 1) {
+      await expect(correctEmailSignIn(t)).rejects.toThrow(SESSION_FAILURE);
+    }
+
+    createSession.mockRestore();
+    const signedIn = await correctEmailSignIn(t);
+    expect(signedIn.user.email).toBe(DEFAULT_EMAIL);
+    expect(await t.lockoutRows()).toHaveLength(0);
+  });
+
+  it("still signs in and logs a summary when resetting the counter fails", async () => {
+    const t = await open({ policy });
+    await t.signUp();
+    await wrongEmailSignIn(t);
+    await wrongEmailSignIn(t);
+    const original = t.adapter.deleteMany.bind(t.adapter);
+    vi.spyOn(t.adapter, "deleteMany").mockImplementation((async (input: {
+      model: string;
+      where?: { field: string }[];
+    }) => {
+      if (input.model === "signInLockout" && input.where?.some((clause) => clause.field === "identifier")) {
+        throw new Error(`Failed query: delete from sign_in_lockout\nparams: ${DEFAULT_EMAIL}`);
+      }
+      return original(input as never);
+    }) as never);
+    const logged = vi.spyOn(t.context.logger, "error").mockImplementation(() => undefined);
+
+    const signedIn = await correctEmailSignIn(t);
+
+    expect(signedIn.user.email).toBe(DEFAULT_EMAIL);
+    const resetCalls = logged.mock.calls.filter(
+      (call) => call[0] === "password-policy: failed to reset the sign-in lockout counter",
+    );
+    expect(resetCalls).toHaveLength(1);
+    expect(resetCalls[0]?.[1]).toEqual({ name: "Error", code: null });
+    const serialized = logged.mock.calls.flatMap((call) => call.flatMap((arg) => collectLoggedStrings(arg)));
+    expect(serialized.join("\n")).not.toContain(DEFAULT_EMAIL);
+    expect(serialized.join("\n")).not.toContain("Failed query");
+    expect((await t.lockoutRow(EMAIL_IDENTIFIER))?.failedAttempts).toBe(3);
   });
 });

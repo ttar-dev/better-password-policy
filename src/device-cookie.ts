@@ -1,6 +1,7 @@
 import type { createAuthMiddleware } from "better-auth/api";
 import { createDeviceId, deviceCookieBinding } from "./lockout-keys.ts";
 import { readNonEmptyString } from "./record.ts";
+import { parsePasswordChangedAt } from "./requirement.ts";
 
 export const DEVICE_COOKIE_NAME = "password_policy_device";
 
@@ -30,14 +31,8 @@ export const parseDeviceCookieValue = (raw: string): DeviceCookieValue | null =>
 };
 
 export const passwordEpochOf = (user: Record<string, unknown>): string => {
-  const changedAt = user.passwordChangedAt;
-  const parsed =
-    changedAt instanceof Date
-      ? changedAt
-      : typeof changedAt === "string" || typeof changedAt === "number"
-        ? new Date(changedAt)
-        : null;
-  return parsed === null || Number.isNaN(parsed.getTime()) ? "none" : String(parsed.getTime());
+  const changedAt = parsePasswordChangedAt(user.passwordChangedAt);
+  return changedAt === null ? "none" : String(changedAt.getTime());
 };
 
 export const readDeviceCookie = async (ctx: SignInHookContext): Promise<DeviceCookieValue | null> => {

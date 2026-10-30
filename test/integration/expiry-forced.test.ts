@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   createAuthRegistry,
   captureApiError,
@@ -240,6 +240,37 @@ describe("forced password change", () => {
       () => t.auth.api.listSessions({ headers: user.headers }),
       "PASSWORD_CHANGE_REQUIRED",
     );
+  });
+
+  it("reads a millisecond-timestamp passwordChangedAt", async () => {
+    const t = await open({ policy: { expiration: { maxAge: 3600 } } });
+    const user = await t.signUp();
+    const ms = Date.now() - TWO_HOURS * 1000;
+    vi.spyOn(t.context.internalAdapter, "findUserById").mockResolvedValueOnce({
+      ...(await t.getUser(user.id)),
+      passwordChangedAt: ms,
+    } as never);
+
+    const status = await t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } });
+
+    expect(status.passwordChangedAt?.getTime()).toBe(ms);
+    expect(status.passwordExpiresAt?.getTime()).toBe(ms + 3_600_000);
+    expect(status.passwordChangeRequirement).toBe("expired");
+  });
+
+  it("reports null for an invalid Date passwordChangedAt", async () => {
+    const t = await open({ policy: { expiration: { maxAge: 3600 } } });
+    const user = await t.signUp();
+    vi.spyOn(t.context.internalAdapter, "findUserById").mockResolvedValueOnce({
+      ...(await t.getUser(user.id)),
+      passwordChangedAt: new Date(Number.NaN),
+    } as never);
+
+    const status = await t.auth.api.getPasswordPolicyStatus({ query: { userId: user.id } });
+
+    expect(status.passwordChangedAt).toBeNull();
+    expect(status.passwordExpiresAt).toBeNull();
+    expect(status.passwordChangeRequirement).toBeNull();
   });
 
   it("answers 404 USER_NOT_FOUND for an unknown user id", async () => {

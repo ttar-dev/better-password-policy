@@ -1,22 +1,20 @@
 export type PasswordChangeRequirement = "forced" | "expired" | null;
 
-const toTime = (value: Date | string | null | undefined): number | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  const time = (value instanceof Date ? value : new Date(value)).getTime();
-  return Number.isNaN(time) ? null : time;
+export const parsePasswordChangedAt = (value: unknown): Date | null => {
+  const parsed =
+    value instanceof Date ? value : typeof value === "string" || typeof value === "number" ? new Date(value) : null;
+  return parsed === null || Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 export const getPasswordExpiresAt = (
   passwordChangedAt: Date | string | null | undefined,
   maxAgeSeconds: number | null | undefined,
 ): Date | null => {
-  const changedAt = toTime(passwordChangedAt);
+  const changedAt = parsePasswordChangedAt(passwordChangedAt);
   if (changedAt === null || maxAgeSeconds === null || maxAgeSeconds === undefined) {
     return null;
   }
-  return new Date(changedAt + maxAgeSeconds * 1000);
+  return new Date(changedAt.getTime() + maxAgeSeconds * 1000);
 };
 
 export const getPasswordChangeRequirement = (

@@ -366,6 +366,24 @@ describe("trusted device counting", () => {
     expect(row?.lockedUntil).toBeNull();
   });
 
+  it("clears only the device counter when a trusted sign-in throws after the password verified", async () => {
+    const t = await open({ policy });
+    const user = await t.signUp();
+    const device = await obtainDevice(t);
+    await wrongEmail(t);
+    await wrongEmail(t);
+    await wrongEmail(t, device);
+    await wrongEmail(t, device);
+    vi.spyOn(t.context.internalAdapter, "createSession").mockRejectedValueOnce(
+      new Error("session store unavailable"),
+    );
+
+    await expect(signInOk(t, device)).rejects.toThrow("session store unavailable");
+
+    expect(await t.deviceLockoutRows(user.id)).toHaveLength(0);
+    expect((await t.lockoutRow(EMAIL_IDENTIFIER))?.failedAttempts).toBe(2);
+  });
+
   it("deletes the identifier row on an untrusted success", async () => {
     const t = await open({ policy });
     await t.signUp();
